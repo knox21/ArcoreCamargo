@@ -62,6 +62,10 @@ data class KmzDocument(
     val isGeoreferenced: Boolean = false,
     /** Local 3D meshes for the IFC viewer (and non-geo solids). */
     val localMeshes: List<LocalMesh> = emptyList(),
+    /** Where the mesh local origin sits on Earth, so AR can place the real model. */
+    val meshOrigin: LatLngAlt? = null,
+    /** Rotation from the mesh local axes to true north, degrees counter-clockwise. */
+    val meshRotationDeg: Float = 0f,
 ) {
     val featureCount: Int get() = points.size + lines.size + polygons.size + localMeshes.size
 

@@ -2,6 +2,7 @@ package com.arcoregeo.campoar.ui.ar
 
 import android.graphics.Color
 import com.arcoregeo.campoar.data.LatLngAlt
+import com.arcoregeo.campoar.data.LocalMesh
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
@@ -125,6 +126,88 @@ fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
     val g = ((colorInt shr 8) and 0xFF) / 255f
     val b = (colorInt and 0xFF) / 255f
     return createArVisibleColor(Float4(r, g, b, 1f))
+}
+
+/**
+ * Places the IFC mesh itself in AR, so the camera shows the same model as the 3D
+ * viewer instead of a box around the footprint.
+ *
+ * Mesh coordinates are metres in the model local frame (Y up, Z = −north before
+ * rotation). [meshOrigin] is where that frame's origin sits on Earth and
+ * [rotationDeg] turns its axes onto true north.
+ */
+fun buildMeshNodes(
+    engine: Engine,
+    materials: ArSolidMaterials,
+    meshes: List<LocalMesh>,
+    calibration: ReferenceCalibration,
+    meshOrigin: LatLngAlt?,
+    rotationDeg: Float,
+    heightOffsetMeters: Float = 0f,
+): List<Node> {
+    if (meshes.isEmpty()) return emptyList()
+
+    val offset = meshOrigin?.let { calibration.enuOf(it) }
+    val east = offset?.east?.toFloat() ?: 0f
+    val north = offset?.north?.toFloat() ?: 0f
+    val up = (offset?.up?.toFloat() ?: 0f) + heightOffsetMeters
+
+    val palette = listOf(materials.wall, materials.top, materials.bottom)
+    return meshes.mapIndexedNotNull { index, mesh ->
+        val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size]) ?: return@mapIndexedNotNull null
+        GeometryNode(engine, geometry, palette[index % palette.size]) {
+            culling(false)
+        }.apply {
+            position = Position(east, up, -north)
+            rotation = Position(0f, rotationDeg, 0f)
+        }
+    }
+}
+
+private val MESH_COLORS = listOf(
+    Float4(0.98f, 0.62f, 0.22f, 1f),
+    Float4(1f, 0.90f, 0.40f, 1f),
+    Float4(0.45f, 0.78f, 1f, 1f),
+)
+
+private fun buildMeshGeometry(engine: Engine, mesh: LocalMesh, color: Float4): Geometry? {
+    if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return null
+
+    // Filament indexes natively; an out-of-range index takes the process down.
+    val indices = ArrayList<Int>(mesh.indices.size)
+    val normals = Array(mesh.vertices.size) { Float3(0f, 0f, 0f) }
+    var t = 0
+    while (t + 2 < mesh.indices.size) {
+        val ia = mesh.indices[t]
+        val ib = mesh.indices[t + 1]
+        val ic = mesh.indices[t + 2]
+        if (ia in mesh.vertices.indices && ib in mesh.vertices.indices && ic in mesh.vertices.indices) {
+            indices += ia
+            indices += ib
+            indices += ic
+            val a = mesh.vertices[ia]
+            val b = mesh.vertices[ib]
+            val c = mesh.vertices[ic]
+            val n = Float3(
+                (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
+                (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x),
+            )
+            normals[ia] = Float3(normals[ia].x + n.x, normals[ia].y + n.y, normals[ia].z + n.z)
+            normals[ib] = Float3(normals[ib].x + n.x, normals[ib].y + n.y, normals[ib].z + n.z)
+            normals[ic] = Float3(normals[ic].x + n.x, normals[ic].y + n.y, normals[ic].z + n.z)
+        }
+        t += 3
+    }
+    if (indices.isEmpty()) return null
+
+    val vertices = mesh.vertices.mapIndexed { i, v ->
+        val n = normals[i]
+        val len = sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+        val normal = if (len < 1e-6f) Float3(0f, 1f, 0f) else Float3(n.x / len, n.y / len, n.z / len)
+        Geometry.Vertex(Float3(v.x, v.y, v.z), normal, Float2(0f, 0f), color)
+    }
+    return Geometry.Builder().vertices(vertices).indices(indices).build(engine)
 }
 
 private fun buildWallGeometry(

@@ -63,13 +63,11 @@ import com.arcoregeo.campoar.geo.DevicePose
 import com.arcoregeo.campoar.geo.GeoMath
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.arcoregeo.campoar.viewmodel.CampoUiState
-import com.google.android.filament.IndirectLight
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Earth
 import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
-import dev.romainguy.kotlin.math.Float3
 import io.github.sceneview.ar.ARScene
 import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.node.AnchorNode
@@ -123,8 +121,12 @@ fun ArScreen(
     var rootAnchor by remember { mutableStateOf<Anchor?>(null) }
     var ref1Geo by remember { mutableStateOf<LatLngAlt?>(null) }
     var ref1World by remember { mutableStateOf<FloatArray?>(null) }
-    var showSolid by remember { mutableStateOf(document.polygons.isNotEmpty()) }
-    var showMarkers by remember { mutableStateOf(document.polygons.isEmpty()) }
+    var showSolid by remember {
+        mutableStateOf(document.polygons.isNotEmpty() || document.localMeshes.isNotEmpty())
+    }
+    var showMarkers by remember {
+        mutableStateOf(document.polygons.isEmpty() && document.localMeshes.isEmpty())
+    }
     var sceneView by remember { mutableStateOf<ARSceneView?>(null) }
     var calibPanelOpen by remember { mutableStateOf(false) }
     var fixHint by remember { mutableStateOf<String?>(null) }
@@ -164,7 +166,7 @@ fun ArScreen(
     val pose = state.pose
     val solidCentroid = remember(document.id) {
         val allVerts = document.polygons.flatMap { openRing(it.ring) }
-        centroidOf(allVerts) ?: targets.firstOrNull()?.coordinate
+        centroidOf(allVerts) ?: document.meshOrigin ?: targets.firstOrNull()?.coordinate
     }
     val solidHalfExtentM = remember(document.id, solidCentroid) {
         val c = solidCentroid ?: return@remember 15f
@@ -172,6 +174,13 @@ fun ArScreen(
         document.polygons.forEach { poly ->
             openRing(poly.ring).forEach { p ->
                 maxD = maxOf(maxD, GeoMath.distanceMeters(c, p))
+            }
+        }
+        if (maxD == 0.0) {
+            document.localMeshes.forEach { mesh ->
+                mesh.vertices.forEach { v ->
+                    maxD = maxOf(maxD, kotlin.math.sqrt((v.x * v.x + v.z * v.z).toDouble()))
+                }
             }
         }
         maxD.toFloat().coerceAtLeast(5f)
@@ -524,6 +533,7 @@ private fun ArWorldScene(
     val modelLoader = rememberModelLoader(engine)
     val solidMaterials = remember(materialLoader) { ArSolidMaterials(materialLoader) }
     var childNodes by remember { mutableStateOf(emptyList<Node>()) }
+    var youNode by remember { mutableStateOf<CubeNode?>(null) }
     var sceneViewRef by remember { mutableStateOf<ARSceneView?>(null) }
 
     var activeAnchor by remember { mutableStateOf<Anchor?>(null) }
@@ -567,18 +577,13 @@ private fun ArWorldScene(
         }
     }
 
-    // Rebuilding on every GPS sample would recreate every renderable ~1×/s, so the
-    // position only re-triggers a build when it moved about a metre.
-    val poseCell = pose?.coordinate?.let {
-        (it.latitude * 1e5).toInt() to (it.longitude * 1e5).toInt()
-    }
-
-    LaunchedEffect(activeAnchor, activeCalib, targets, document.id, showSolid, showMarkers, poseCell, heightOffsetM) {
+    LaunchedEffect(activeAnchor, activeCalib, targets, document.id, showSolid, showMarkers, heightOffsetM) {
         val anchor = activeAnchor
         val calib = activeCalib
         val previousRoot = childNodes.firstOrNull()
         if (anchor == null || calib == null) {
             childNodes = emptyList()
+            youNode = null
             runCatching { previousRoot?.destroy() }
             onSolidBuilt(0)
             return@LaunchedEffect
@@ -586,20 +591,35 @@ private fun ArWorldScene(
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
         if (showSolid) {
-            val rings = document.polygons.take(MAX_AR_SOLIDS)
-            val detailed = rings.size <= DETAILED_SOLID_LIMIT
-            rings.forEach { polygon ->
-                val solid = buildSolidNodes(
+            if (document.localMeshes.isNotEmpty()) {
+                // Show the real IFC model, same geometry as the 3D viewer.
+                val meshNodes = buildMeshNodes(
                     engine = engine,
                     materials = solidMaterials,
-                    ring = openRing(polygon.ring),
+                    meshes = document.localMeshes,
                     calibration = calib,
-                    heightMeters = document.solidHeightMeters ?: SOLID_HEIGHT_M,
+                    meshOrigin = document.meshOrigin,
+                    rotationDeg = document.meshRotationDeg,
                     heightOffsetMeters = heightOffsetM,
-                    detailed = detailed,
                 )
-                parts += solid.size
-                solid.forEach { root.addChildNode(it) }
+                parts += meshNodes.size
+                meshNodes.forEach { root.addChildNode(it) }
+            } else {
+                val rings = document.polygons.take(MAX_AR_SOLIDS)
+                val detailed = rings.size <= DETAILED_SOLID_LIMIT
+                rings.forEach { polygon ->
+                    val solid = buildSolidNodes(
+                        engine = engine,
+                        materials = solidMaterials,
+                        ring = openRing(polygon.ring),
+                        calibration = calib,
+                        heightMeters = document.solidHeightMeters ?: SOLID_HEIGHT_M,
+                        heightOffsetMeters = heightOffsetM,
+                        detailed = detailed,
+                    )
+                    parts += solid.size
+                    solid.forEach { root.addChildNode(it) }
+                }
             }
         }
         onSolidBuilt(parts)
@@ -624,26 +644,35 @@ private fun ArWorldScene(
         // In GPS mode (origin = phone) this sits at the camera; in Geospatial/Manual
         // it sits wherever GPS says you are vs the plot — so you can see if you're
         // outside the solid instead of assuming the center point is you.
-        pose?.coordinate?.let { you ->
-            val enu = calib.enuOf(you)
-            val dist = kotlin.math.sqrt(enu.east * enu.east + enu.north * enu.north)
-            if (dist < 250.0) {
-                root.addChildNode(
-                    CubeNode(
-                        engine = engine,
-                        size = Size(0.45f, 2.0f, 0.45f),
-                        center = Position(
-                            x = enu.east.toFloat(),
-                            y = 1.0f + enu.up.toFloat(),
-                            z = (-enu.north).toFloat(),
-                        ),
-                        materialInstance = solidMaterials.you,
-                    ),
-                )
-            }
-        }
+        val marker = CubeNode(
+            engine = engine,
+            size = Size(0.45f, 2.0f, 0.45f),
+            center = Position(0f, 0f, 0f),
+            materialInstance = solidMaterials.you,
+        ).apply { isVisible = false }
+        root.addChildNode(marker)
+        youNode = marker
         childNodes = listOf(root)
         runCatching { previousRoot?.destroy() }
+    }
+
+    // Moving the marker is cheap; rebuilding the model on every GPS fix is not.
+    LaunchedEffect(youNode, activeCalib, pose?.coordinate) {
+        val marker = youNode ?: return@LaunchedEffect
+        val calib = activeCalib
+        val you = pose?.coordinate
+        if (calib == null || you == null) {
+            marker.isVisible = false
+            return@LaunchedEffect
+        }
+        val enu = calib.enuOf(you)
+        val dist = kotlin.math.sqrt(enu.east * enu.east + enu.north * enu.north)
+        marker.isVisible = dist < 250.0
+        marker.position = Position(
+            x = enu.east.toFloat(),
+            y = 1.0f + enu.up.toFloat(),
+            z = (-enu.north).toFloat(),
+        )
     }
 
     val gestureListener = rememberOnGestureListener(
@@ -677,17 +706,7 @@ private fun ArWorldScene(
         },
         onViewCreated = {
             sceneViewRef = this
-            runCatching {
-                lightEstimator?.isEnabled = false
-                indirectLight = IndirectLight.Builder()
-                    .irradiance(1, floatArrayOf(0.8f, 0.8f, 0.8f))
-                    .intensity(50_000f)
-                    .build(engine)
-                mainLightNode?.apply {
-                    intensity = 80_000f
-                    lightDirection = Float3(0.35f, -1f, -0.45f)
-                }
-            }
+            runCatching { applyFixedLighting() }
             onSceneViewReady(this)
         },
         onSessionUpdated = { session, frame ->

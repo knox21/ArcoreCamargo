@@ -281,6 +281,8 @@ object IfcGeoParser {
             sourceKind = "ifc",
             isGeoreferenced = georeferenced && polygons.isNotEmpty(),
             localMeshes = merged,
+            meshOrigin = mapConversion?.toLatLng(0.0, 0.0) ?: siteOrigin,
+            meshRotationDeg = mapConversion?.let { modelToNorthDegrees(it) } ?: 0f,
         )
     }
 
@@ -868,6 +870,21 @@ object IfcGeoParser {
             return match.groupValues[1].toInt() to match.groupValues[2].equals("S", true)
         }
         return null
+    }
+
+    /**
+     * Angle from the model X axis to true east, measured on the ground. Taken from
+     * two projected points instead of the IfcMapConversion angle alone, so it also
+     * absorbs the UTM grid convergence that the footprint conversion already has.
+     */
+    private fun modelToNorthDegrees(conversion: MapConversion): Float {
+        val probe = 100.0
+        val origin = conversion.toLatLng(0.0, 0.0)
+        val alongX = conversion.toLatLng(probe, 0.0)
+        val east = Math.toRadians(alongX.longitude - origin.longitude) *
+            EARTH_RADIUS_M * cos(Math.toRadians(origin.latitude))
+        val north = Math.toRadians(alongX.latitude - origin.latitude) * EARTH_RADIUS_M
+        return Math.toDegrees(atan2(north, east)).toFloat()
     }
 
     private fun MapConversion.toLatLng(localX: Double, localY: Double): LatLngAlt {

@@ -1,5 +1,6 @@
 package com.arcoregeo.campoar.data
 
+import com.arcoregeo.campoar.geo.GeoMath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -293,6 +294,50 @@ class IfcGeoParserTest {
         doc.localMeshes.forEach { mesh ->
             val maxIndex = mesh.indices.max()
             assertTrue("index out of range: $maxIndex", maxIndex < mesh.vertices.size)
+        }
+    }
+
+    /**
+     * AR places the mesh by rotating it [KmzDocument.meshRotationDeg] around the up
+     * axis and offsetting it to [KmzDocument.meshOrigin]. That has to land exactly
+     * on the georeferenced footprint, or the model floats away from the plot.
+     */
+    @Test
+    fun `mesh origin and rotation match the georeferenced footprint`() {
+        val rotated = """
+            ISO-10303-21;
+            DATA;
+            #16=IFCPROJECTEDCRS('EPSG:32719','WGS 84 / UTM zone 19S',${'$'},'EPSG','32719',${'$'},#10);
+            #17=IFCMAPCONVERSION(#15,#16,229978.386950,8182863.234587,0.000,0.8660254,0.5,1.);
+            #40=IFCCARTESIANPOINT((0.,0.));
+            #41=IFCCARTESIANPOINT((10.,0.));
+            #42=IFCCARTESIANPOINT((10.,6.));
+            #43=IFCCARTESIANPOINT((0.,6.));
+            #44=IFCPOLYLINE((#40,#41,#42,#43,#40));
+            #45=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,'Footprint',#44);
+            #49=IFCEXTRUDEDAREASOLID(#45,${'$'},${'$'},3.000);
+            ENDSEC;
+            END-ISO-10303-21;
+        """.trimIndent()
+
+        val doc = IfcGeoParser.parse("rotado.ifc", rotated)
+        val origin = doc.meshOrigin!!
+        // 30° from the map conversion plus the UTM grid convergence of the zone.
+        assertTrue("rotation was ${doc.meshRotationDeg}", abs(doc.meshRotationDeg - 30f) < 1.5f)
+
+        val theta = Math.toRadians(doc.meshRotationDeg.toDouble())
+        val cos = kotlin.math.cos(theta)
+        val sin = kotlin.math.sin(theta)
+        val vertices = doc.localMeshes.flatMap { it.vertices }
+
+        openRing(doc.polygons.first().ring).forEach { corner ->
+            val enu = GeoMath.toEnu(origin, corner)
+            val placed = vertices.any { v ->
+                val east = v.x * cos + v.z * sin
+                val north = -(-v.x * sin + v.z * cos)
+                abs(east - enu.east) < 0.05 && abs(north - enu.north) < 0.05
+            }
+            assertTrue("no mesh vertex at ${enu.east}, ${enu.north}", placed)
         }
     }
 
