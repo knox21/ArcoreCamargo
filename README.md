@@ -16,10 +16,17 @@ App Android para ubicar puntos de un **KMZ/KML** en el terreno con la cámara, G
 El lector acepta, entre otros:
 
 - `IfcExtrudedAreaSolid` con perfil `Polyline`, `IndexedPolyCurve`, rectángulo o círculo
+- Edificios de Revit (IFC2X3): muros, losas, columnas y vigas con `IfcLocalPlacement`, `IfcBooleanClippingResult` y `IfcMappedItem`
 - `IfcTriangulatedFaceSet` / `IfcPolygonalFaceSet` / `IfcPolyLoop`
 - Con o **sin** georreferencia (`IfcSite` / `IfcMapConversion`)
 
 Sin georreferencia igual puedes abrir el visor 3D. Para mapa/AR el IFC debe traer coordenadas geográficas.
+
+En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real: de lejos se ve pequeña y de cerca grande.
+
+### Modelos grandes
+
+El archivo se recorre en streaming, sin cargarlo entero en memoria, y se descartan propiedades, cantidades y relaciones. Aun así la geometría se acota para que el teléfono pueda dibujarla: hasta 150.000 vértices repartidos en grupos de 30.000. El tope de tamaño del IFC depende de la memoria del equipo (unos 100 MB en un teléfono con heap de 256 MB); si te pasas, la app lo dice en vez de cerrarse.
 
 ## Geospatial no sustituye el modo offline
 

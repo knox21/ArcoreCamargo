@@ -160,8 +160,10 @@ object IfcGeoParser {
             if (height != null) maxHeight = maxOf(maxHeight, height)
         }
 
+        // Sorted by STEP id so a truncated model is always the same subset.
         val products = model.entities.entries
             .filter { it.value.type in PRODUCT_TYPES }
+            .sortedBy { it.key }
             .take(MAX_PRODUCTS)
 
         if (products.isNotEmpty()) {
@@ -746,7 +748,7 @@ object IfcGeoParser {
             val type = statement.substring(eq + 1, open).trim().uppercase()
             val body = statement.substring(open + 1, close)
 
-            if (type == "IFCCARTESIANPOINT" || type == "IFCDIRECTION" || type == "IFCVERTEXPOINT") {
+            if (type == "IFCCARTESIANPOINT" || type == "IFCDIRECTION") {
                 numbersOf(body)?.let { model.coords[id] = it }
                 return@forEachStatement
             }
