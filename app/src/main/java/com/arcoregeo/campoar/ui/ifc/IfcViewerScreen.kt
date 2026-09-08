@@ -65,15 +65,6 @@ fun IfcViewerScreen(
         position = orbitHome
         lookAt(lookTarget)
     }
-    // SceneView defaults to a 30 m far plane: a whole building sits behind it and
-    // nothing at all is drawn. The planes have to follow the model size.
-    LaunchedEffect(cameraNode, orbitHome) {
-        val radius = sqrt(
-            orbitHome.x * orbitHome.x + orbitHome.y * orbitHome.y + orbitHome.z * orbitHome.z,
-        )
-        cameraNode.near = (radius / 1000f).coerceIn(0.05f, 5f)
-        cameraNode.far = max(60f, radius * 6f)
-    }
     val cameraManipulator = rememberCameraManipulator(
         orbitHomePosition = orbitHome,
         targetPosition = lookTarget,
@@ -90,9 +81,12 @@ fun IfcViewerScreen(
             }
         }
         document.geometryNote?.let { note -> info = "$info · $note" }
+        val framing = framingFor(built.spanMeters)
         lookTarget = built.lookAt
-        orbitHome = built.cameraPos
-        cameraNode.position = built.cameraPos
+        orbitHome = framing.cameraPosition
+        cameraNode.near = framing.near
+        cameraNode.far = framing.far
+        cameraNode.position = framing.cameraPosition
         cameraNode.lookAt(built.lookAt)
     }
 
@@ -164,7 +158,7 @@ fun IfcViewerScreen(
 
 private data class ViewerBuild(
     val nodes: List<Node>,
-    val cameraPos: Position,
+    val spanMeters: Float,
     val lookAt: Position,
     val summary: String,
 )
@@ -175,7 +169,7 @@ private fun buildViewerNodes(
     meshes: List<LocalMesh>,
 ): ViewerBuild {
     if (meshes.isEmpty()) {
-        return ViewerBuild(emptyList(), Position(0f, 5f, 10f), Position(0f, 0f, 0f), "")
+        return ViewerBuild(emptyList(), 10f, Position(0f, 0f, 0f), "")
     }
 
     var minX = Float.MAX_VALUE
@@ -199,7 +193,7 @@ private fun buildViewerNodes(
         }
     }
     if (vertexCount == 0) {
-        return ViewerBuild(emptyList(), Position(0f, 5f, 10f), Position(0f, 0f, 0f), "")
+        return ViewerBuild(emptyList(), 10f, Position(0f, 0f, 0f), "")
     }
     val cx = (minX + maxX) / 2f
     val cy = (minY + maxY) / 2f
@@ -226,10 +220,9 @@ private fun buildViewerNodes(
         }.getOrNull()
     }
 
-    val dist = span * 1.8f
     return ViewerBuild(
         nodes = nodes,
-        cameraPos = Position(dist * 0.7f, dist * 0.55f, dist),
+        spanMeters = span,
         lookAt = Position(0f, 0f, 0f),
         summary = "${meshes.size} sólido(s) · $vertexCount vértices · ${"%.1f".format(span)} m",
     )

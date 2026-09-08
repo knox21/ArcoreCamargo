@@ -82,3 +82,9 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
 }
+
+tasks.withType<Test>().configureEach {
+    // Phone-sized heap: the IFC reader has to stay inside a mid-range device budget,
+    // and IfcGeoParserTest imports a Revit-sized export to prove it.
+    maxHeapSize = "192m"
+}

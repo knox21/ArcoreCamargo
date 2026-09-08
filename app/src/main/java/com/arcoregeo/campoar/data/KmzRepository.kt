@@ -15,13 +15,14 @@ class KmzRepository(context: Context) {
     private val appContext = context.applicationContext
 
     /**
-     * A STEP file needs roughly 2.5× its size in heap while it is being indexed
-     * (measured on Revit-style exports), so the ceiling follows the device heap.
+     * Indexing a STEP file peaks at roughly 4× its size in heap (measured on
+     * Revit-style exports), and the rest of the app has to fit next to it, so the
+     * ceiling follows the device heap.
      */
     private val maxIfcBytes: Long by lazy {
         val heapMb = (appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
             ?.largeMemoryClass ?: 256
-        (heapMb * 4L / 10L).coerceIn(48L, 400L) * 1024 * 1024
+        (heapMb * 22L / 100L).coerceIn(48L, 600L) * 1024 * 1024
     }
     private val libraryDir = File(appContext.filesDir, "kmz").apply { mkdirs() }
     private val indexFile = File(libraryDir, "index.json")

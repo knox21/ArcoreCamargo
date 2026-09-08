@@ -15,18 +15,25 @@ App Android para ubicar puntos de un **KMZ/KML** en el terreno con la cámara, G
 
 El lector acepta, entre otros:
 
-- `IfcExtrudedAreaSolid` con perfil `Polyline`, `IndexedPolyCurve`, rectángulo o círculo
-- Edificios de Revit (IFC2X3): muros, losas, columnas y vigas con `IfcLocalPlacement`, `IfcBooleanClippingResult` y `IfcMappedItem`
-- `IfcTriangulatedFaceSet` / `IfcPolygonalFaceSet` / `IfcPolyLoop`
+- `IfcExtrudedAreaSolid` y `IfcRevolvedAreaSolid` con perfil `Polyline`, `IndexedPolyCurve`, rectángulo, círculo, hueco o sección de acero (I, T, L, U, C, Z), además de perfiles derivados y compuestos
+- Edificios de Revit (IFC2X3 / IFC4): muros, losas, columnas y vigas con `IfcLocalPlacement`, `IfcBooleanClippingResult`, `IfcCsgSolid` y `IfcMappedItem`
+- `IfcFacetedBrep`, `IfcAdvancedBrep` y superficies por caras, con `IfcPolyLoop` o `IfcEdgeLoop`
+- `IfcTriangulatedFaceSet` / `IfcPolygonalFaceSet`
 - Con o **sin** georreferencia (`IfcSite` / `IfcMapConversion`)
 
 Sin georreferencia igual puedes abrir el visor 3D. Para mapa/AR el IFC debe traer coordenadas geográficas.
 
-En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real: de lejos se ve pequeña y de cerca grande.
+Al importar, el documento guarda un resumen de lo leído (sólidos, elementos, recortes y tipos sin soporte) que se muestra bajo el visor. Si un archivo no deja nada dibujable, el error nombra los tipos de geometría que encontró.
+
+En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real. A más de 100 m el modelo se acerca sobre la línea que lo une contigo, conservando rumbo y orientación, y la pantalla avisa de la distancia real; al acercarte vuelve a escala real.
+
+Una malla solo se coloca por GPS si el IFC trajo origen georreferenciado. Los documentos importados con versiones anteriores no lo tienen, así que se dibuja su contorno (que sí está georreferenciado) y la cámara pide reimportar el IFC.
 
 ### Modelos grandes
 
-El archivo se recorre en streaming, sin cargarlo entero en memoria, y se descartan propiedades, cantidades y relaciones. Aun así la geometría se acota para que el teléfono pueda dibujarla: hasta 150.000 vértices repartidos en grupos de 30.000. El tope de tamaño del IFC depende de la memoria del equipo (unos 100 MB en un teléfono con heap de 256 MB); si te pasas, la app lo dice en vez de cerrarse.
+El archivo se recorre en streaming, sin cargarlo entero en memoria y sin crear una cadena por sentencia; se descartan propiedades, cantidades y relaciones. Indexar un IFC cuesta unas 4 veces su tamaño en memoria, así que el tope depende del equipo: unos 56 MB con heap de 256 MB y 112 MB con heap de 512 MB. Si te pasas, la app lo dice en vez de cerrarse.
+
+La geometría también se acota para que el teléfono pueda dibujarla: hasta 6.000 elementos y 150.000 vértices repartidos en grupos de 30.000. Los sólidos con coordenadas imposibles (placements roscos) se descartan para que el encuadre del visor no se vaya al infinito.
 
 ## Geospatial no sustituye el modo offline
 

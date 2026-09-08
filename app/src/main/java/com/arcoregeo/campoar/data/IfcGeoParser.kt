@@ -36,10 +36,13 @@ object IfcGeoParser {
     /** Segments used to approximate a revolved solid. */
     private const val REVOLVE_STEPS = 12
 
+    /**
+     * Arguments are split on demand and not cached: a Revit export holds hundreds of
+     * thousands of entities, and keeping a parsed list per entity costs more heap
+     * than the rest of the import together.
+     */
     private class Entity(val type: String, val argsRaw: String) {
-        private var parsed: List<String>? = null
-        val args: List<String>
-            get() = parsed ?: splitArgs(argsRaw).also { parsed = it }
+        val args: List<String> get() = splitArgs(argsRaw)
     }
 
     /** Points and directions are the bulk of an IFC; keep them as plain numbers. */
@@ -969,46 +972,112 @@ object IfcGeoParser {
 
     private fun readModel(source: Reader): Model {
         val model = Model()
+        // A few hundred distinct type names, reused instead of one string per entity.
+        val typePool = HashMap<String, String>(512)
+
         forEachStatement(source) { statement ->
-            val eq = statement.indexOf('=')
-            if (eq < 0) return@forEachStatement
-            val open = statement.indexOf('(', eq + 1)
-            if (open < 0) return@forEachStatement
-            val hash = statement.indexOf('#')
-            if (hash < 0 || hash > eq) return@forEachStatement
-            val id = statement.substring(hash + 1, eq).trim().toIntOrNull() ?: return@forEachStatement
+            val length = statement.length
+            if (length < 4 || statement[0] != '#') return@forEachStatement
+
+            var at = 1
+            var id = 0
+            var digits = 0
+            while (at < length) {
+                val ch = statement[at]
+                if (ch < '0' || ch > '9') break
+                id = id * 10 + (ch - '0')
+                digits++
+                at++
+            }
+            if (digits == 0 || digits > 9) return@forEachStatement
+            while (at < length && statement[at] == ' ') at++
+            if (at >= length || statement[at] != '=') return@forEachStatement
+            at++
+            while (at < length && statement[at] == ' ') at++
+
+            val typeStart = at
+            while (at < length && statement[at] != '(') at++
+            if (at >= length) return@forEachStatement
+            val open = at
+            var typeEnd = open
+            while (typeEnd > typeStart && statement[typeEnd - 1] == ' ') typeEnd--
+            if (typeEnd == typeStart) return@forEachStatement
             val close = statement.lastIndexOf(')')
             if (close <= open) return@forEachStatement
-            val type = statement.substring(eq + 1, open).trim().uppercase()
-            val body = statement.substring(open + 1, close)
 
-            if (type == "IFCCARTESIANPOINT" || type == "IFCDIRECTION") {
-                numbersOf(body)?.let { model.coords[id] = it }
+            if (statement.regionMatchesIgnoreCase(typeStart, typeEnd, "IFCCARTESIANPOINT") ||
+                statement.regionMatchesIgnoreCase(typeStart, typeEnd, "IFCDIRECTION")
+            ) {
+                readNumbers(statement, open + 1, close)?.let { model.coords[id] = it }
                 return@forEachStatement
             }
-            if (SKIPPED_PREFIXES.any { type.startsWith(it) }) return@forEachStatement
-            model.entities[id] = Entity(type, body)
+            if (SKIPPED_PREFIXES.any { statement.startsWithIgnoreCase(typeStart, typeEnd, it) }) {
+                return@forEachStatement
+            }
+
+            val name = statement.substring(typeStart, typeEnd).uppercase()
+            model.entities[id] = Entity(typePool.getOrPut(name) { name }, statement.substring(open + 1, close))
         }
         return model
     }
 
-    private fun numbersOf(body: String): DoubleArray? {
-        val inner = body.trim().removePrefix("(").removeSuffix(")")
-        val parts = inner.split(',')
-        if (parts.size < 2) return null
-        val out = DoubleArray(parts.size)
-        parts.forEachIndexed { i, part ->
-            out[i] = part.trim().toDoubleOrNull() ?: return null
+    /** True when `[from, to)` of this builder equals [other], ignoring ASCII case. */
+    private fun StringBuilder.regionMatchesIgnoreCase(from: Int, to: Int, other: String): Boolean {
+        if (to - from != other.length) return false
+        return startsWithIgnoreCase(from, to, other)
+    }
+
+    private fun StringBuilder.startsWithIgnoreCase(from: Int, to: Int, prefix: String): Boolean {
+        if (to - from < prefix.length) return false
+        for (i in prefix.indices) {
+            val a = this[from + i]
+            val b = prefix[i]
+            if (a != b && a.uppercaseChar() != b) return false
         }
-        return out
+        return true
+    }
+
+    /** Coordinates of `((1.,2.,3.))` style bodies, taken straight off the buffer. */
+    private fun readNumbers(statement: StringBuilder, from: Int, to: Int): DoubleArray? {
+        var start = from
+        var end = to
+        while (start < end && statement[start] == ' ') start++
+        while (end > start && statement[end - 1] == ' ') end--
+        if (start < end && statement[start] == '(' && statement[end - 1] == ')') {
+            start++
+            end--
+        }
+        if (start >= end) return null
+
+        val values = DoubleArray(4)
+        var count = 0
+        var tokenStart = start
+        var index = start
+        while (index <= end) {
+            if (index == end || statement[index] == ',') {
+                if (count == values.size) return null
+                var a = tokenStart
+                var b = index
+                while (a < b && statement[a] == ' ') a++
+                while (b > a && statement[b - 1] == ' ') b--
+                if (a >= b) return null
+                val value = statement.substring(a, b).toDoubleOrNull() ?: return null
+                values[count++] = value
+                tokenStart = index + 1
+            }
+            index++
+        }
+        if (count < 2) return null
+        return values.copyOf(count)
     }
 
     /**
-     * Streams `#id=TYPE(...);` statements without materialising the whole file:
-     * a Revit export can be hundreds of megabytes. Header statements are ignored
-     * because they do not start with `#`.
+     * Streams `#id=TYPE(...);` statements over one reused buffer: a Revit export can
+     * be hundreds of megabytes, and a string per statement was most of the garbage
+     * the import produced. Header statements are ignored because they do not start
+     * with `#`. The builder is only valid inside [action].
      */
-    private fun forEachStatement(source: Reader, action: (String) -> Unit) {
+    private fun forEachStatement(source: Reader, action: (StringBuilder) -> Unit) {
         val buffer = CharArray(1 shl 16)
         val current = StringBuilder(256)
         var inString = false
@@ -1016,9 +1085,8 @@ object IfcGeoParser {
         var pendingQuote = false
 
         fun flush() {
-            val statement = current.toString().trim()
+            if (current.isNotEmpty() && current[0] == '#') action(current)
             current.setLength(0)
-            if (statement.startsWith("#")) action(statement)
         }
 
         while (true) {
@@ -1048,7 +1116,9 @@ object IfcGeoParser {
                         current.append(ch)
                     }
                     ch == ';' -> flush()
-                    ch == '\n' || ch == '\r' -> current.append(' ')
+                    // Leading blanks are dropped so a statement always starts on '#'.
+                    ch == '\n' || ch == '\r' || ch == '\t' || ch == ' ' ->
+                        if (current.isNotEmpty()) current.append(' ')
                     else -> current.append(ch)
                 }
             }

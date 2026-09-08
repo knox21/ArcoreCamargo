@@ -1,6 +1,9 @@
 package com.arcoregeo.campoar.ui.ar
 
+import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.data.LatLngAlt
+import com.arcoregeo.campoar.data.LocalMesh
+import com.arcoregeo.campoar.data.Vec3f
 import com.arcoregeo.campoar.geo.GeoMath
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import org.junit.Assert.assertEquals
@@ -50,6 +53,42 @@ class FarViewPlacementTest {
         assertEquals(58f, viewDistanceFor(30f))
         assertEquals(70f, viewDistanceFor(200f))
         assertTrue(viewDistanceFor(80f) <= 70f)
+    }
+
+    /** Revit puts the IFC origin on the project base point, not on the building. */
+    @Test
+    fun `mesh document is measured from the model centre, not from its origin`() {
+        val origin = LatLngAlt(-16.42051897, -71.52842835)
+        val document = KmzDocument(
+            id = "d",
+            fileName = "edificio.ifc",
+            storedFileName = "",
+            importedAtEpochMs = 0L,
+            points = emptyList(),
+            sourceKind = "ifc",
+            // 20 m box sitting 100 m east and 40 m north of the IFC origin.
+            localMeshes = listOf(
+                LocalMesh(
+                    name = "caja",
+                    vertices = listOf(
+                        Vec3f(90f, 0f, -30f),
+                        Vec3f(110f, 0f, -30f),
+                        Vec3f(110f, 6f, -50f),
+                        Vec3f(90f, 6f, -50f),
+                    ),
+                    indices = listOf(0, 1, 2, 0, 2, 3),
+                ),
+            ),
+            meshOrigin = origin,
+        )
+
+        val extent = solidExtentOf(document, null)
+        val centre = extent.centroid!!
+        val enu = GeoMath.toEnu(origin, centre)
+
+        assertEquals(100.0, enu.east, 0.5)
+        assertEquals(40.0, enu.north, 0.5)
+        assertEquals(14.1, extent.halfExtentM.toDouble(), 0.5)
     }
 
     @Test

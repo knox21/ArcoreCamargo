@@ -4,6 +4,7 @@ import com.arcoregeo.campoar.geo.GeoMath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import kotlin.math.abs
 
 class IfcGeoParserTest {
@@ -244,19 +245,18 @@ class IfcGeoParserTest {
         assertEquals(3f, doc.solidHeightMeters)
     }
 
-    @Test
-    fun `keeps a complex building within the render budget`() {
-        val walls = 4_000
-        val ifc = buildString {
-            appendLine("ISO-10303-21;")
-            appendLine("HEADER;")
-            appendLine("FILE_SCHEMA(('IFC2X3'));")
-            appendLine("ENDSEC;")
-            appendLine("DATA;")
-            appendLine("#1=IFCCARTESIANPOINT((0.,0.,0.));")
-            appendLine("#2=IFCDIRECTION((0.,0.,1.));")
-            appendLine("#3=IFCDIRECTION((1.,0.));")
-            appendLine("#4=IFCAXIS2PLACEMENT3D(#1,${'$'},${'$'});")
+    /** Writes a Revit-shaped export: every wall carries placement, profile and props. */
+    private fun writeSyntheticBuilding(target: File, walls: Int) {
+        target.bufferedWriter(Charsets.ISO_8859_1).use { out ->
+            out.appendLine("ISO-10303-21;")
+            out.appendLine("HEADER;")
+            out.appendLine("FILE_SCHEMA(('IFC2X3'));")
+            out.appendLine("ENDSEC;")
+            out.appendLine("DATA;")
+            out.appendLine("#1=IFCCARTESIANPOINT((0.,0.,0.));")
+            out.appendLine("#2=IFCDIRECTION((0.,0.,1.));")
+            out.appendLine("#3=IFCDIRECTION((1.,0.));")
+            out.appendLine("#4=IFCAXIS2PLACEMENT3D(#1,${'$'},${'$'});")
             var id = 100
             repeat(walls) { i ->
                 val origin = id++
@@ -270,23 +270,59 @@ class IfcGeoParserTest {
                 val wall = id++
                 val propertySet = id++
                 val relation = id++
-                appendLine("#$origin=IFCCARTESIANPOINT((${i * 2}.,0.,0.));")
-                appendLine("#$axis2d=IFCAXIS2PLACEMENT2D(#1,#3);")
-                appendLine("#$place3d=IFCAXIS2PLACEMENT3D(#$origin,${'$'},${'$'});")
-                appendLine("#$local=IFCLOCALPLACEMENT(${'$'},#$place3d);")
-                appendLine("#$profile=IFCRECTANGLEPROFILEDEF(.AREA.,${'$'},#$axis2d,2.,0.3);")
-                appendLine("#$solid=IFCEXTRUDEDAREASOLID(#$profile,#4,#2,2.7);")
-                appendLine("#$rep=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#$solid));")
-                appendLine("#$shape=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#$rep));")
-                appendLine("#$wall=IFCWALLSTANDARDCASE('w$i',${'$'},'Muro $i',${'$'},${'$'},#$local,#$shape,'$i');")
-                appendLine("#$propertySet=IFCPROPERTYSINGLEVALUE('Ancho',${'$'},IFCREAL(0.3),${'$'});")
-                appendLine("#$relation=IFCRELDEFINESBYPROPERTIES('r$i',${'$'},${'$'},${'$'},(#$wall),#$propertySet);")
+                out.appendLine("#$origin=IFCCARTESIANPOINT((${i % 200}.,${i / 200}.,0.));")
+                out.appendLine("#$axis2d=IFCAXIS2PLACEMENT2D(#1,#3);")
+                out.appendLine("#$place3d=IFCAXIS2PLACEMENT3D(#$origin,${'$'},${'$'});")
+                out.appendLine("#$local=IFCLOCALPLACEMENT(${'$'},#$place3d);")
+                out.appendLine("#$profile=IFCRECTANGLEPROFILEDEF(.AREA.,${'$'},#$axis2d,2.,0.3);")
+                out.appendLine("#$solid=IFCEXTRUDEDAREASOLID(#$profile,#4,#2,2.7);")
+                out.appendLine("#$rep=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#$solid));")
+                out.appendLine("#$shape=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#$rep));")
+                out.appendLine(
+                    "#$wall=IFCWALLSTANDARDCASE('guid$i',#5,'Basic Wall:Muro básico:$i'," +
+                        "${'$'},'Basic Wall:Muro básico',#$local,#$shape,'$i');",
+                )
+                out.appendLine("#$propertySet=IFCPROPERTYSINGLEVALUE('Ancho',${'$'},IFCREAL(0.3),${'$'});")
+                out.appendLine(
+                    "#$relation=IFCRELDEFINESBYPROPERTIES('r$i',#5,${'$'},${'$'},(#$wall),#$propertySet);",
+                )
             }
-            appendLine("ENDSEC;")
-            appendLine("END-ISO-10303-21;")
+            out.appendLine("ENDSEC;")
+            out.appendLine("END-ISO-10303-21;")
         }
+    }
 
-        val doc = IfcGeoParser.parse("edificio.ifc", ifc)
+    /**
+     * The reader runs inside a phone heap (see the test JVM budget in build.gradle),
+     * so importing an export of this size has to finish without hoarding it.
+     */
+    @Test
+    fun `imports a Revit sized export inside a phone heap`() {
+        val file = File.createTempFile("edificio", ".ifc")
+        try {
+            writeSyntheticBuilding(file, walls = 20_000)
+            assertTrue("file was ${file.length()} bytes", file.length() > 8L * 1024 * 1024)
+
+            val doc = file.bufferedReader(Charsets.ISO_8859_1).use {
+                IfcGeoParser.parse("edificio.ifc", it)
+            }
+
+            assertTrue("no geometry", doc.localMeshes.isNotEmpty())
+            assertTrue("note was ${doc.geometryNote}", doc.geometryNote!!.contains("20000 elementos"))
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `keeps a complex building within the render budget`() {
+        val file = File.createTempFile("budget", ".ifc")
+        val doc = try {
+            writeSyntheticBuilding(file, walls = 4_000)
+            file.bufferedReader(Charsets.ISO_8859_1).use { IfcGeoParser.parse("edificio.ifc", it) }
+        } finally {
+            file.delete()
+        }
         val vertices = doc.localMeshes.sumOf { it.vertices.size }
         assertTrue("no geometry", vertices > 0)
         assertTrue("vertex budget exceeded: $vertices", vertices <= 150_000)

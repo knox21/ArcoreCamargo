@@ -57,7 +57,6 @@ import com.arcoregeo.campoar.BuildConfig
 import com.arcoregeo.campoar.data.GeoPoint
 import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.data.LatLngAlt
-import com.arcoregeo.campoar.data.centroidOf
 import com.arcoregeo.campoar.data.openRing
 import com.arcoregeo.campoar.geo.DevicePose
 import com.arcoregeo.campoar.geo.GeoMath
@@ -79,6 +78,7 @@ import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberModelLoader
 import io.github.sceneview.rememberOnGestureListener
+import kotlin.math.abs
 import kotlin.math.atan2
 
 private enum class CalibMode { Idle, WaitTap1, WaitTap2 }
@@ -100,6 +100,31 @@ private const val AR_FAR_M = 2_000f
 
 /** How the virtual content is currently anchored to the real world. */
 enum class Placement { None, Gps, Geospatial, Manual, Local }
+
+/**
+ * Last GPS fix the solid was placed from. Rebuilding the model costs a frame, so it
+ * only follows real movement, a real turn, or entering/leaving the far view.
+ */
+private class GpsFixMemo {
+    private var fix: LatLngAlt? = null
+    private var yaw = 0.0
+    private var farAway = false
+
+    val wasFarAway: Boolean get() = farAway
+
+    fun shouldUpdate(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean): Boolean {
+        val previous = fix ?: return true
+        return newFarAway != farAway ||
+            GeoMath.distanceMeters(previous, coordinate) > 1.5 ||
+            abs(GeoMath.wrappedDeltaDegrees(yaw, newYaw)) > 8f
+    }
+
+    fun remember(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean) {
+        fix = coordinate
+        yaw = newYaw
+        farAway = newFarAway
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -172,27 +197,11 @@ fun ArScreen(
 
     val selected = targets.firstOrNull { it.id == state.selectedPointId } ?: targets.firstOrNull()
     val pose = state.pose
-    val solidCentroid = remember(document.id) {
-        val allVerts = document.polygons.flatMap { openRing(it.ring) }
-        centroidOf(allVerts) ?: document.meshOrigin ?: targets.firstOrNull()?.coordinate
+    val solidExtent = remember(document.id, targets) {
+        solidExtentOf(document, targets.firstOrNull()?.coordinate)
     }
-    val solidHalfExtentM = remember(document.id, solidCentroid) {
-        val c = solidCentroid ?: return@remember 15f
-        var maxD = 0.0
-        document.polygons.forEach { poly ->
-            openRing(poly.ring).forEach { p ->
-                maxD = maxOf(maxD, GeoMath.distanceMeters(c, p))
-            }
-        }
-        if (maxD == 0.0) {
-            document.localMeshes.forEach { mesh ->
-                mesh.vertices.forEach { v ->
-                    maxD = maxOf(maxD, kotlin.math.sqrt((v.x * v.x + v.z * v.z).toDouble()))
-                }
-            }
-        }
-        maxD.toFloat().coerceAtLeast(5f)
-    }
+    val solidCentroid = solidExtent.centroid
+    val solidHalfExtentM = solidExtent.halfExtentM
 
     fun clearCalibration() {
         rootAnchor?.detach()
@@ -312,6 +321,21 @@ fun ArScreen(
                         showSolid = showSolid,
                         polygonCount = document.polygons.size,
                     )
+                    if (document.localMeshes.isNotEmpty() &&
+                        document.meshOrigin == null &&
+                        document.polygons.isNotEmpty()
+                    ) {
+                        Text(
+                            "Mostrando el contorno georreferenciado · reimporta el IFC " +
+                                "para ver la malla real en su sitio",
+                            color = Color(0xFFBFDBFE),
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .padding(top = 6.dp)
+                                .background(Color(0xCC1E3A8A), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                    }
                     farViewDistanceM?.let { real ->
                         Text(
                             "Vista lejana · el modelo está a ${GeoMath.formatDistance(real)}, " +
@@ -566,6 +590,7 @@ private fun ArWorldScene(
     var handledBringHere by remember { mutableStateOf(0) }
     var handledResumeGps by remember { mutableStateOf(0) }
     var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
+    val lastFix = remember { GpsFixMemo() }
 
     // The AR session callback outlives recompositions, so read the live values.
     val livePose by rememberUpdatedState(pose)
@@ -845,9 +870,8 @@ private fun ArWorldScene(
                 val realDistance = centroid?.let {
                     GeoMath.distanceMeters(devicePose.coordinate, it)
                 }
-                val farAway = centroid != null &&
-                    realDistance != null &&
-                    realDistance > FAR_VIEW_TRIGGER_M
+                val farAway = centroid != null && realDistance != null &&
+                    realDistance > if (lastFix.wasFarAway) FAR_VIEW_EXIT_M else FAR_VIEW_TRIGGER_M
                 val originGeo = if (farAway) {
                     farViewOrigin(
                         centroid = centroid!!,
@@ -876,15 +900,13 @@ private fun ArWorldScene(
                     )
                     runCatching { session.createAnchor(groundPose) }.getOrNull()?.let { anchor ->
                         replaceAnchor(anchor, newCalib, Placement.Gps)
+                        lastFix.remember(devicePose.coordinate, yaw, farAway)
                     }
-                } else if (!liveGpsLocked) {
-                    val prev = liveCalib
-                    if (prev == null ||
-                        GeoMath.distanceMeters(prev.originGeo, devicePose.coordinate) > 1.5 ||
-                        kotlin.math.abs(GeoMath.wrappedDeltaDegrees(prev.yawDegrees, yaw)) > 8f
-                    ) {
-                        activeCalib = newCalib
-                    }
+                } else if (!liveGpsLocked && lastFix.shouldUpdate(devicePose.coordinate, yaw, farAway)) {
+                    // Compared against the last fix, not against the calibration origin,
+                    // which in the far view sits next to the model instead of on you.
+                    lastFix.remember(devicePose.coordinate, yaw, farAway)
+                    activeCalib = newCalib
                 }
             }
         },
