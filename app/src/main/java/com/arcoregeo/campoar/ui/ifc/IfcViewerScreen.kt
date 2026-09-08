@@ -168,13 +168,27 @@ private fun buildViewerNodes(
         return ViewerBuild(emptyList(), Position(0f, 5f, 10f), Position(0f, 0f, 0f), "")
     }
 
-    val allVerts = meshes.flatMap { it.vertices }
-    val minX = allVerts.minOf { it.x }
-    val maxX = allVerts.maxOf { it.x }
-    val minY = allVerts.minOf { it.y }
-    val maxY = allVerts.maxOf { it.y }
-    val minZ = allVerts.minOf { it.z }
-    val maxZ = allVerts.maxOf { it.z }
+    var minX = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var minY = Float.MAX_VALUE
+    var maxY = -Float.MAX_VALUE
+    var minZ = Float.MAX_VALUE
+    var maxZ = -Float.MAX_VALUE
+    var vertexCount = 0
+    meshes.forEach { mesh ->
+        mesh.vertices.forEach { v ->
+            if (v.x < minX) minX = v.x
+            if (v.x > maxX) maxX = v.x
+            if (v.y < minY) minY = v.y
+            if (v.y > maxY) maxY = v.y
+            if (v.z < minZ) minZ = v.z
+            if (v.z > maxZ) maxZ = v.z
+            vertexCount++
+        }
+    }
+    if (vertexCount == 0) {
+        return ViewerBuild(emptyList(), Position(0f, 5f, 10f), Position(0f, 0f, 0f), "")
+    }
     val cx = (minX + maxX) / 2f
     val cy = (minY + maxY) / 2f
     val cz = (minZ + maxZ) / 2f
@@ -189,13 +203,15 @@ private fun buildViewerNodes(
     )
 
     val nodes = meshes.mapIndexedNotNull { index, mesh ->
-        meshToNode(
-            engine = engine,
-            materialLoader = materialLoader,
-            mesh = mesh,
-            origin = Vec3f(cx, cy, cz),
-            color = colors[index % colors.size],
-        )
+        runCatching {
+            meshToNode(
+                engine = engine,
+                materialLoader = materialLoader,
+                mesh = mesh,
+                origin = Vec3f(cx, cy, cz),
+                color = colors[index % colors.size],
+            )
+        }.getOrNull()
     }
 
     val dist = span * 1.8f
@@ -203,7 +219,7 @@ private fun buildViewerNodes(
         nodes = nodes,
         cameraPos = Position(dist * 0.7f, dist * 0.55f, dist),
         lookAt = Position(0f, 0f, 0f),
-        summary = "${meshes.size} sólido(s) · ${allVerts.size} vértices · ${"%.1f".format(span)} m",
+        summary = "${meshes.size} sólido(s) · $vertexCount vértices · ${"%.1f".format(span)} m",
     )
 }
 
@@ -216,6 +232,8 @@ private fun meshToNode(
 ): GeometryNode? {
     if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return null
 
+    // Filament reads the index buffer natively: an out-of-range index is a hard crash.
+    val safeIndices = ArrayList<Int>(mesh.indices.size)
     val normalsArr = Array(mesh.vertices.size) { Float3(0f, 1f, 0f) }
     var t = 0
     while (t + 2 < mesh.indices.size) {
@@ -223,6 +241,9 @@ private fun meshToNode(
         val ib = mesh.indices[t + 1]
         val ic = mesh.indices[t + 2]
         if (ia in mesh.vertices.indices && ib in mesh.vertices.indices && ic in mesh.vertices.indices) {
+            safeIndices += ia
+            safeIndices += ib
+            safeIndices += ic
             val a = mesh.vertices[ia]
             val b = mesh.vertices[ib]
             val c = mesh.vertices[ic]
@@ -235,6 +256,7 @@ private fun meshToNode(
         }
         t += 3
     }
+    if (safeIndices.isEmpty()) return null
     val shaded = mesh.vertices.mapIndexed { idx, v ->
         Geometry.Vertex(
             position = Float3(v.x - origin.x, v.y - origin.y, v.z - origin.z),
@@ -245,7 +267,7 @@ private fun meshToNode(
     }
     val geometry = Geometry.Builder()
         .vertices(shaded)
-        .indices(mesh.indices)
+        .indices(safeIndices)
         .build(engine)
     val material = materialLoader.createColorInstance(color, metallic = 0.05f, roughness = 0.45f, reflectance = 0.3f)
     return GeometryNode(engine, geometry, material) {

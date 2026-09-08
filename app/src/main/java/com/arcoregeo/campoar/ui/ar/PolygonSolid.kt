@@ -18,18 +18,41 @@ import io.github.sceneview.node.Node
 import kotlin.math.atan2
 import kotlin.math.sqrt
 
+private val WALL_COLOR = Float4(0.98f, 0.62f, 0.22f, 1f)
+private val TOP_COLOR = Float4(1f, 0.90f, 0.40f, 1f)
+private val BOTTOM_COLOR = Float4(0.45f, 0.78f, 1f, 1f)
+
+/**
+ * Material instances shared by every solid of a document. They live as long as the
+ * [MaterialLoader], so creating one set per rebuild would leak the previous ones.
+ */
+class ArSolidMaterials(loader: MaterialLoader) {
+    val wall: MaterialInstance = loader.createArVisibleColor(WALL_COLOR)
+    val top: MaterialInstance = loader.createArVisibleColor(TOP_COLOR)
+    val bottom: MaterialInstance = loader.createArVisibleColor(BOTTOM_COLOR)
+    val edgeTop: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#FDE047"))
+    val edgeBottom: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
+    val post: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#F8FAFC"))
+    val marker: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
+    val you: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#34D399"))
+}
+
 /**
  * Exact extruded prism matching the IFC/KML footprint — no axis-aligned bounding
  * box (that was distorting rotated plots). Walls + caps from the real ring,
  * plus thin colored edges so the silhouette stays readable in AR.
+ *
+ * [detailed] adds the edge beams and corner cubes. Buildings with many footprints
+ * turn that into thousands of renderables, so callers disable it there.
  */
 fun buildSolidNodes(
     engine: Engine,
-    materialLoader: MaterialLoader,
+    materials: ArSolidMaterials,
     ring: List<LatLngAlt>,
     calibration: ReferenceCalibration,
     heightMeters: Float,
     heightOffsetMeters: Float = 0f,
+    detailed: Boolean = true,
 ): List<Node> {
     if (ring.size < 3) return emptyList()
 
@@ -41,54 +64,44 @@ fun buildSolidNodes(
     val h = heightMeters.coerceAtLeast(0.5f)
     val yTop = y0 + h
 
-    // Bright + emissive so ARCore light estimation does not turn the solid black.
-    val wallColor = Float4(0.98f, 0.62f, 0.22f, 1f)
-    val topColor = Float4(1f, 0.90f, 0.40f, 1f)
-    val bottomColor = Float4(0.45f, 0.78f, 1f, 1f)
-
-    val wallMat = materialLoader.createArVisibleColor(wallColor)
-    val topMat = materialLoader.createArVisibleColor(topColor)
-    val bottomMat = materialLoader.createArVisibleColor(bottomColor)
-    val edgeTopMat = materialLoader.createArVisibleColor(Color.parseColor("#FDE047"))
-    val edgeBottomMat = materialLoader.createArVisibleColor(Color.parseColor("#38BDF8"))
-    val postMat = materialLoader.createArVisibleColor(Color.parseColor("#F8FAFC"))
-
     val nodes = mutableListOf<Node>()
 
-    buildWallGeometry(engine, base, y0, yTop, wallColor)?.let { geometry ->
-        nodes += GeometryNode(engine, geometry, wallMat) {
+    buildWallGeometry(engine, base, y0, yTop, WALL_COLOR)?.let { geometry ->
+        nodes += GeometryNode(engine, geometry, materials.wall) {
             culling(false)
         }
     }
 
-    buildCapGeometry(engine, base, yTop, Float3(0f, 1f, 0f), topColor)?.let { geometry ->
-        nodes += GeometryNode(engine, geometry, topMat) {
+    buildCapGeometry(engine, base, yTop, Float3(0f, 1f, 0f), TOP_COLOR)?.let { geometry ->
+        nodes += GeometryNode(engine, geometry, materials.top) {
             culling(false)
         }
     }
-    buildCapGeometry(engine, base, y0, Float3(0f, -1f, 0f), bottomColor)?.let { geometry ->
-        nodes += GeometryNode(engine, geometry, bottomMat) {
+    buildCapGeometry(engine, base, y0, Float3(0f, -1f, 0f), BOTTOM_COLOR)?.let { geometry ->
+        nodes += GeometryNode(engine, geometry, materials.bottom) {
             culling(false)
         }
     }
+
+    if (!detailed) return nodes
 
     for (i in base.indices) {
         val a = base[i]
         val b = base[(i + 1) % base.size]
-        beam(engine, nodes, a.x, y0, a.y, b.x, y0, b.y, 0.08f, edgeBottomMat)
-        beam(engine, nodes, a.x, yTop, a.y, b.x, yTop, b.y, 0.08f, edgeTopMat)
-        beam(engine, nodes, a.x, y0, a.y, a.x, yTop, a.y, 0.09f, postMat)
+        beam(engine, nodes, a.x, y0, a.y, b.x, y0, b.y, 0.08f, materials.edgeBottom)
+        beam(engine, nodes, a.x, yTop, a.y, b.x, yTop, b.y, 0.08f, materials.edgeTop)
+        beam(engine, nodes, a.x, y0, a.y, a.x, yTop, a.y, 0.09f, materials.post)
         nodes += CubeNode(
             engine = engine,
             size = Size(0.22f, 0.22f, 0.22f),
             center = Position(a.x, y0 + 0.12f, a.y),
-            materialInstance = edgeBottomMat,
+            materialInstance = materials.edgeBottom,
         )
         nodes += CubeNode(
             engine = engine,
             size = Size(0.18f, 0.18f, 0.18f),
             center = Position(a.x, yTop, a.y),
-            materialInstance = edgeTopMat,
+            materialInstance = materials.edgeTop,
         )
     }
 

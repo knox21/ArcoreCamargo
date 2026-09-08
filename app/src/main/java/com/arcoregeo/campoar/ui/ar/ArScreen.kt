@@ -63,11 +63,13 @@ import com.arcoregeo.campoar.geo.DevicePose
 import com.arcoregeo.campoar.geo.GeoMath
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.arcoregeo.campoar.viewmodel.CampoUiState
+import com.google.android.filament.IndirectLight
 import com.google.ar.core.Anchor
 import com.google.ar.core.Config
 import com.google.ar.core.Earth
 import com.google.ar.core.Pose
 import com.google.ar.core.TrackingState
+import dev.romainguy.kotlin.math.Float3
 import io.github.sceneview.ar.ARScene
 import io.github.sceneview.ar.ARSceneView
 import io.github.sceneview.ar.node.AnchorNode
@@ -85,6 +87,11 @@ private enum class CalibMode { Idle, WaitTap1, WaitTap2 }
 
 private const val SOLID_HEIGHT_M = 3f
 private const val EYE_HEIGHT_M = 1.4f
+
+/** Renderable budget for AR: complex IFC buildings arrive with dozens of footprints. */
+private const val MAX_AR_SOLIDS = 40
+private const val DETAILED_SOLID_LIMIT = 4
+private const val MAX_AR_MARKERS = 120
 
 /** How the virtual content is currently anchored to the real world. */
 enum class Placement { None, Gps, Geospatial, Manual, Local }
@@ -515,6 +522,7 @@ private fun ArWorldScene(
     val engine = rememberEngine()
     val materialLoader = rememberMaterialLoader(engine)
     val modelLoader = rememberModelLoader(engine)
+    val solidMaterials = remember(materialLoader) { ArSolidMaterials(materialLoader) }
     var childNodes by remember { mutableStateOf(emptyList<Node>()) }
     var sceneViewRef by remember { mutableStateOf<ARSceneView?>(null) }
 
@@ -559,25 +567,36 @@ private fun ArWorldScene(
         }
     }
 
-    LaunchedEffect(activeAnchor, activeCalib, targets, document.id, showSolid, showMarkers, pose?.coordinate, heightOffsetM) {
+    // Rebuilding on every GPS sample would recreate every renderable ~1×/s, so the
+    // position only re-triggers a build when it moved about a metre.
+    val poseCell = pose?.coordinate?.let {
+        (it.latitude * 1e5).toInt() to (it.longitude * 1e5).toInt()
+    }
+
+    LaunchedEffect(activeAnchor, activeCalib, targets, document.id, showSolid, showMarkers, poseCell, heightOffsetM) {
         val anchor = activeAnchor
         val calib = activeCalib
+        val previousRoot = childNodes.firstOrNull()
         if (anchor == null || calib == null) {
             childNodes = emptyList()
+            runCatching { previousRoot?.destroy() }
             onSolidBuilt(0)
             return@LaunchedEffect
         }
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
         if (showSolid) {
-            document.polygons.forEach { polygon ->
+            val rings = document.polygons.take(MAX_AR_SOLIDS)
+            val detailed = rings.size <= DETAILED_SOLID_LIMIT
+            rings.forEach { polygon ->
                 val solid = buildSolidNodes(
                     engine = engine,
-                    materialLoader = materialLoader,
+                    materials = solidMaterials,
                     ring = openRing(polygon.ring),
                     calibration = calib,
                     heightMeters = document.solidHeightMeters ?: SOLID_HEIGHT_M,
                     heightOffsetMeters = heightOffsetM,
+                    detailed = detailed,
                 )
                 parts += solid.size
                 solid.forEach { root.addChildNode(it) }
@@ -585,7 +604,7 @@ private fun ArWorldScene(
         }
         onSolidBuilt(parts)
         if (showMarkers) {
-            targets.forEach { point ->
+            targets.take(MAX_AR_MARKERS).forEach { point ->
                 val enu = calib.enuOf(point.coordinate)
                 root.addChildNode(
                     CubeNode(
@@ -596,9 +615,7 @@ private fun ArWorldScene(
                             y = 0.8f + enu.up.toFloat(),
                             z = (-enu.north).toFloat(),
                         ),
-                        materialInstance = materialLoader.createArVisibleColor(
-                            android.graphics.Color.parseColor("#38BDF8"),
-                        ),
+                        materialInstance = solidMaterials.marker,
                     ),
                 )
             }
@@ -620,14 +637,13 @@ private fun ArWorldScene(
                             y = 1.0f + enu.up.toFloat(),
                             z = (-enu.north).toFloat(),
                         ),
-                        materialInstance = materialLoader.createArVisibleColor(
-                            android.graphics.Color.parseColor("#22C55E"),
-                        ),
+                        materialInstance = solidMaterials.you,
                     ),
                 )
             }
         }
         childNodes = listOf(root)
+        runCatching { previousRoot?.destroy() }
     }
 
     val gestureListener = rememberOnGestureListener(
@@ -652,13 +668,26 @@ private fun ArWorldScene(
         onGestureListener = gestureListener,
         sessionConfiguration = { session, config ->
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
-            config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
+            // SceneView re-multiplies the main light intensity by the ARCore estimate on
+            // every frame, which fades the model to black. Use fixed lighting instead.
+            config.lightEstimationMode = Config.LightEstimationMode.DISABLED
             if (session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)) {
                 config.geospatialMode = Config.GeospatialMode.ENABLED
             }
         },
         onViewCreated = {
             sceneViewRef = this
+            runCatching {
+                lightEstimator?.isEnabled = false
+                indirectLight = IndirectLight.Builder()
+                    .irradiance(1, floatArrayOf(0.8f, 0.8f, 0.8f))
+                    .intensity(50_000f)
+                    .build(engine)
+                mainLightNode?.apply {
+                    intensity = 80_000f
+                    lightDirection = Float3(0.35f, -1f, -0.45f)
+                }
+            }
             onSceneViewReady(this)
         },
         onSessionUpdated = { session, frame ->

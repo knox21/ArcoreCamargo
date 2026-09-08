@@ -243,6 +243,59 @@ class IfcGeoParserTest {
         assertEquals(3f, doc.solidHeightMeters)
     }
 
+    @Test
+    fun `keeps a complex building within the render budget`() {
+        val walls = 4_000
+        val ifc = buildString {
+            appendLine("ISO-10303-21;")
+            appendLine("HEADER;")
+            appendLine("FILE_SCHEMA(('IFC2X3'));")
+            appendLine("ENDSEC;")
+            appendLine("DATA;")
+            appendLine("#1=IFCCARTESIANPOINT((0.,0.,0.));")
+            appendLine("#2=IFCDIRECTION((0.,0.,1.));")
+            appendLine("#3=IFCDIRECTION((1.,0.));")
+            appendLine("#4=IFCAXIS2PLACEMENT3D(#1,${'$'},${'$'});")
+            var id = 100
+            repeat(walls) { i ->
+                val origin = id++
+                val axis2d = id++
+                val place3d = id++
+                val local = id++
+                val profile = id++
+                val solid = id++
+                val rep = id++
+                val shape = id++
+                val wall = id++
+                val propertySet = id++
+                val relation = id++
+                appendLine("#$origin=IFCCARTESIANPOINT((${i * 2}.,0.,0.));")
+                appendLine("#$axis2d=IFCAXIS2PLACEMENT2D(#1,#3);")
+                appendLine("#$place3d=IFCAXIS2PLACEMENT3D(#$origin,${'$'},${'$'});")
+                appendLine("#$local=IFCLOCALPLACEMENT(${'$'},#$place3d);")
+                appendLine("#$profile=IFCRECTANGLEPROFILEDEF(.AREA.,${'$'},#$axis2d,2.,0.3);")
+                appendLine("#$solid=IFCEXTRUDEDAREASOLID(#$profile,#4,#2,2.7);")
+                appendLine("#$rep=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#$solid));")
+                appendLine("#$shape=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#$rep));")
+                appendLine("#$wall=IFCWALLSTANDARDCASE('w$i',${'$'},'Muro $i',${'$'},${'$'},#$local,#$shape,'$i');")
+                appendLine("#$propertySet=IFCPROPERTYSINGLEVALUE('Ancho',${'$'},IFCREAL(0.3),${'$'});")
+                appendLine("#$relation=IFCRELDEFINESBYPROPERTIES('r$i',${'$'},${'$'},${'$'},(#$wall),#$propertySet);")
+            }
+            appendLine("ENDSEC;")
+            appendLine("END-ISO-10303-21;")
+        }
+
+        val doc = IfcGeoParser.parse("edificio.ifc", ifc)
+        val vertices = doc.localMeshes.sumOf { it.vertices.size }
+        assertTrue("no geometry", vertices > 0)
+        assertTrue("vertex budget exceeded: $vertices", vertices <= 150_000)
+        assertTrue("too many draw calls: ${doc.localMeshes.size}", doc.localMeshes.size <= 40)
+        doc.localMeshes.forEach { mesh ->
+            val maxIndex = mesh.indices.max()
+            assertTrue("index out of range: $maxIndex", maxIndex < mesh.vertices.size)
+        }
+    }
+
     private fun openRing(ring: List<LatLngAlt>): List<LatLngAlt> {
         if (ring.size < 2) return ring
         val a = ring.first()

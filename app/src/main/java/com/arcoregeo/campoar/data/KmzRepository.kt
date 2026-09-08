@@ -10,6 +10,8 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.UUID
 
+private const val MAX_IFC_BYTES = 220L * 1024 * 1024
+
 class KmzRepository(context: Context) {
     private val appContext = context.applicationContext
     private val libraryDir = File(appContext.filesDir, "kmz").apply { mkdirs() }
@@ -76,10 +78,37 @@ class KmzRepository(context: Context) {
     /** Reads the georeferenced footprint out of an IFC solid. */
     suspend fun importIfcFromUri(uri: Uri, displayName: String): KmzDocument = withContext(Dispatchers.IO) {
         val name = resolveDisplayName(uri, displayName, "modelo.ifc")
-        val text = appContext.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() }
-            ?: error("No se pudo abrir el IFC")
-        store(IfcGeoParser.parse(name, text))
+        val size = querySize(uri)
+        if (size != null && size > MAX_IFC_BYTES) {
+            error(
+                "El IFC pesa ${size / (1024 * 1024)} MB y supera el límite de " +
+                    "${MAX_IFC_BYTES / (1024 * 1024)} MB. Expórtalo por disciplina o sin mobiliario.",
+            )
+        }
+        // STEP files are Latin-1 by spec; decoding straight from the stream avoids
+        // holding the raw bytes and the string at the same time.
+        val text = try {
+            appContext.contentResolver.openInputStream(uri)?.use { stream ->
+                stream.bufferedReader(Charsets.ISO_8859_1).readText()
+            } ?: error("No se pudo abrir el IFC")
+        } catch (oom: OutOfMemoryError) {
+            error("El IFC es demasiado grande para este teléfono. Exporta una parte del modelo.")
+        }
+        val document = try {
+            IfcGeoParser.parse(name, text)
+        } catch (oom: OutOfMemoryError) {
+            error("El IFC tiene demasiada geometría para este teléfono. Exporta menos categorías.")
+        }
+        store(document)
     }
+
+    private fun querySize(uri: Uri): Long? = runCatching {
+        appContext.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) return@use null
+            val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (idx >= 0 && !cursor.isNull(idx)) cursor.getLong(idx) else null
+        }
+    }.getOrNull()
 
     suspend fun importFromStream(displayName: String, stream: java.io.InputStream): KmzDocument =
         withContext(Dispatchers.IO) {
