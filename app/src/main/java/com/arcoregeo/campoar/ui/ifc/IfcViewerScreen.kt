@@ -65,6 +65,15 @@ fun IfcViewerScreen(
         position = orbitHome
         lookAt(lookTarget)
     }
+    // SceneView defaults to a 30 m far plane: a whole building sits behind it and
+    // nothing at all is drawn. The planes have to follow the model size.
+    LaunchedEffect(cameraNode, orbitHome) {
+        val radius = sqrt(
+            orbitHome.x * orbitHome.x + orbitHome.y * orbitHome.y + orbitHome.z * orbitHome.z,
+        )
+        cameraNode.near = (radius / 1000f).coerceIn(0.05f, 5f)
+        cameraNode.far = max(60f, radius * 6f)
+    }
     val cameraManipulator = rememberCameraManipulator(
         orbitHomePosition = orbitHome,
         targetPosition = lookTarget,
@@ -80,6 +89,7 @@ fun IfcViewerScreen(
                 "${document.localMeshes.size} sólido(s)"
             }
         }
+        document.geometryNote?.let { note -> info = "$info · $note" }
         lookTarget = built.lookAt
         orbitHome = built.cameraPos
         cameraNode.position = built.cameraPos
@@ -177,6 +187,8 @@ private fun buildViewerNodes(
     var vertexCount = 0
     meshes.forEach { mesh ->
         mesh.vertices.forEach { v ->
+            // A single NaN would make the bounds NaN and leave the camera nowhere.
+            if (!v.x.isFinite() || !v.y.isFinite() || !v.z.isFinite()) return@forEach
             if (v.x < minX) minX = v.x
             if (v.x > maxX) maxX = v.x
             if (v.y < minY) minY = v.y

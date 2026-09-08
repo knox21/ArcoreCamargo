@@ -91,6 +91,13 @@ private const val MAX_AR_SOLIDS = 40
 private const val DETAILED_SOLID_LIMIT = 4
 private const val MAX_AR_MARKERS = 120
 
+/**
+ * SceneView's camera defaults to a 30 m far plane, which clips a whole building and
+ * every georeferenced model standing further away than that.
+ */
+private const val AR_NEAR_M = 0.1f
+private const val AR_FAR_M = 2_000f
+
 /** How the virtual content is currently anchored to the real world. */
 enum class Placement { None, Gps, Geospatial, Manual, Local }
 
@@ -137,6 +144,7 @@ fun ArScreen(
     var solidParts by remember { mutableStateOf(0) }
     var gpsLocked by remember { mutableStateOf(false) }
     var heightOffsetM by remember { mutableStateOf(0f) }
+    var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
 
     LaunchedEffect(Unit) {
         if (permissionGranted) onStartLocation()
@@ -282,6 +290,7 @@ fun ArScreen(
                     onSolidBuilt = { solidParts = it },
                     onSceneViewReady = { sceneView = it },
                     onPlaneTap = { view, x, y -> handlePlaneTap(view, x, y) },
+                    onFarView = { farViewDistanceM = it },
                     calibrateActive = calibMode != CalibMode.Idle,
                 )
             }
@@ -303,6 +312,19 @@ fun ArScreen(
                         showSolid = showSolid,
                         polygonCount = document.polygons.size,
                     )
+                    farViewDistanceM?.let { real ->
+                        Text(
+                            "Vista lejana · el modelo está a ${GeoMath.formatDistance(real)}, " +
+                                "se acerca manteniendo su dirección y orientación",
+                            color = Color(0xFFFDE68A),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .padding(top = 6.dp)
+                                .background(Color(0xCC78350F), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                    }
                     ControlBar(
                         refCount = calibration?.refCount ?: 0,
                         panelOpen = calibPanelOpen || calibMode != CalibMode.Idle,
@@ -327,13 +349,14 @@ fun ArScreen(
                                 // Exit demo placement and resume real GPS/Geospatial distance.
                                 resumeGpsTick += 1
                                 gpsLocked = false
-                                fixHint = "GPS real: lejos se ve pequeño, cerca se ve grande"
+                                fixHint = "GPS real: cerca a escala; a más de 100 m se acerca " +
+                                    "manteniendo dirección y orientación"
                             } else {
                                 gpsLocked = !gpsLocked
                                 fixHint = if (gpsLocked) {
                                     "GPS anclado · el sólido ya no salta con el GPS"
                                 } else {
-                                    "GPS libre · lejos=pequeño, cerca=grande"
+                                    "GPS libre · sigue tu posición y la del modelo"
                                 }
                             }
                         },
@@ -526,6 +549,7 @@ private fun ArWorldScene(
     onSolidBuilt: (Int) -> Unit,
     onSceneViewReady: (ARSceneView) -> Unit,
     onPlaneTap: (ARSceneView, Float, Float) -> Unit,
+    onFarView: (Double?) -> Unit,
     calibrateActive: Boolean,
 ) {
     val engine = rememberEngine()
@@ -541,6 +565,7 @@ private fun ArWorldScene(
     var placement by remember { mutableStateOf(Placement.None) }
     var handledBringHere by remember { mutableStateOf(0) }
     var handledResumeGps by remember { mutableStateOf(0) }
+    var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
 
     // The AR session callback outlives recompositions, so read the live values.
     val livePose by rememberUpdatedState(pose)
@@ -591,7 +616,11 @@ private fun ArWorldScene(
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
         if (showSolid) {
-            if (document.localMeshes.isNotEmpty()) {
+            // Without a mesh origin the model can only be drawn on the anchor, i.e. on
+            // top of you in GPS mode. The georeferenced footprints are used instead.
+            val meshPlaceable = document.localMeshes.isNotEmpty() &&
+                (document.meshOrigin != null || document.polygons.isEmpty())
+            if (meshPlaceable) {
                 // Show the real IFC model, same geometry as the 3D viewer.
                 val meshNodes = buildMeshNodes(
                     engine = engine,
@@ -656,12 +685,17 @@ private fun ArWorldScene(
         runCatching { previousRoot?.destroy() }
     }
 
+    LaunchedEffect(farViewDistanceM) {
+        onFarView(farViewDistanceM)
+    }
+
     // Moving the marker is cheap; rebuilding the model on every GPS fix is not.
-    LaunchedEffect(youNode, activeCalib, pose?.coordinate) {
+    LaunchedEffect(youNode, activeCalib, pose?.coordinate, farViewDistanceM) {
         val marker = youNode ?: return@LaunchedEffect
         val calib = activeCalib
         val you = pose?.coordinate
-        if (calib == null || you == null) {
+        // In the far view your real offset is not the drawn one, so the marker would lie.
+        if (calib == null || you == null || farViewDistanceM != null) {
             marker.isVisible = false
             return@LaunchedEffect
         }
@@ -707,6 +741,10 @@ private fun ArWorldScene(
         onViewCreated = {
             sceneViewRef = this
             runCatching { applyFixedLighting() }
+            runCatching {
+                cameraNode.near = AR_NEAR_M
+                cameraNode.far = AR_FAR_M
+            }
             onSceneViewReady(this)
         },
         onSessionUpdated = { session, frame ->
@@ -738,9 +776,7 @@ private fun ArWorldScene(
                 handledBringHere = liveBringHere
                 val camPose = camera.pose
                 val forward = camPose.zAxis
-                // Stand back so the full solid fits: ~25–30 m for small plots,
-                // further for large footprints (half-extent + margin).
-                val viewDistance = maxOf(25f, liveHalfExtent * 1.6f + 10f).coerceIn(25f, 70f)
+                val viewDistance = viewDistanceFor(liveHalfExtent)
                 val front = Pose.makeTranslation(
                     camPose.tx() - forward[0] * viewDistance,
                     camPose.ty() - EYE_HEIGHT_M,
@@ -755,7 +791,10 @@ private fun ArWorldScene(
                 }
             }
 
-            if (livePlacement == Placement.Manual || livePlacement == Placement.Local) return@ARScene
+            if (livePlacement == Placement.Manual || livePlacement == Placement.Local) {
+                farViewDistanceM = null
+                return@ARScene
+            }
             // Frozen GPS pose: do not chase new fixes (stops the solid from jumping).
             if (liveGpsLocked && livePlacement == Placement.Gps) return@ARScene
 
@@ -778,6 +817,8 @@ private fun ArWorldScene(
                     )
                 }.getOrNull()
                 if (anchor != null) {
+                    // Earth anchors are absolute, so this mode keeps true distance.
+                    farViewDistanceM = null
                     replaceAnchor(
                         anchor,
                         ReferenceCalibration(originGeo = centroid, yawDegrees = 0.0, refCount = 0),
@@ -786,7 +827,10 @@ private fun ArWorldScene(
                     return@ARScene
                 }
             }
-            if (livePlacement == Placement.Geospatial) return@ARScene
+            if (livePlacement == Placement.Geospatial) {
+                farViewDistanceM = null
+                return@ARScene
+            }
 
             // GPS + compass: solid stays at its real lat/lon relative to YOUR GPS.
             if (cameraReady && devicePose != null && devicePose.hasHeading) {
@@ -796,8 +840,31 @@ private fun ArWorldScene(
                     atan2(-forward[0].toDouble(), forward[2].toDouble()),
                 )
                 val yaw = devicePose.headingDegrees - forwardAngle
+                // Far models are pulled in along the line that joins you to them, so
+                // the bearing you look at and the model's own orientation are kept.
+                val realDistance = centroid?.let {
+                    GeoMath.distanceMeters(devicePose.coordinate, it)
+                }
+                val farAway = centroid != null &&
+                    realDistance != null &&
+                    realDistance > FAR_VIEW_TRIGGER_M
+                val originGeo = if (farAway) {
+                    farViewOrigin(
+                        centroid = centroid!!,
+                        viewer = devicePose.coordinate,
+                        standoffM = viewDistanceFor(liveHalfExtent).toDouble(),
+                    )
+                } else {
+                    devicePose.coordinate
+                }
+                // Quantized so the HUD is not recomposed on every AR frame.
+                farViewDistanceM = if (farAway) {
+                    Math.round(realDistance!! / 5.0) * 5.0
+                } else {
+                    null
+                }
                 val newCalib = ReferenceCalibration(
-                    originGeo = devicePose.coordinate,
+                    originGeo = originGeo,
                     yawDegrees = yaw,
                     refCount = 0,
                 )

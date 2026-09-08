@@ -1,6 +1,7 @@
 package com.arcoregeo.campoar.geo
 
 import com.arcoregeo.campoar.data.LatLngAlt
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -77,6 +78,19 @@ object GeoMath {
     fun wrappedDeltaDegrees(targetBearing: Double, heading: Double): Float {
         val delta = (targetBearing - heading + 540.0) % 360.0 - 180.0
         return delta.toFloat()
+    }
+
+    /** Point [distanceMeters] away from [origin] on [bearingDegrees]; inverse of [toEnu]. */
+    fun destination(origin: LatLngAlt, bearingDegrees: Double, distanceMeters: Double): LatLngAlt {
+        val rad = Math.toRadians(bearingDegrees)
+        val north = cos(rad) * distanceMeters
+        val east = sin(rad) * distanceMeters
+        val cosLat = cos(Math.toRadians(origin.latitude)).let { if (abs(it) < 1e-9) 1e-9 else it }
+        return LatLngAlt(
+            latitude = origin.latitude + Math.toDegrees(north / EARTH_RADIUS_M),
+            longitude = origin.longitude + Math.toDegrees(east / (EARTH_RADIUS_M * cosLat)),
+            altitude = origin.altitude,
+        )
     }
 
     /** East/North/Up meters of [point] relative to [origin]. */
