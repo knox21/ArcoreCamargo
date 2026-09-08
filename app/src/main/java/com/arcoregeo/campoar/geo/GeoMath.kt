@@ -100,7 +100,14 @@ object GeoMath {
         val dLon = Math.toRadians(point.longitude - origin.longitude)
         val north = dLat * EARTH_RADIUS_M
         val east = dLon * EARTH_RADIUS_M * cos(latRad)
-        val up = (point.altitude ?: 0.0) - (origin.altitude ?: 0.0)
+        // An unknown altitude is not sea level. IFC and KML models rarely carry one
+        // while the phone always reports its own, and subtracting the two put the
+        // solid a couple of kilometres underground on any site above sea level.
+        val up = if (point.altitude != null && origin.altitude != null) {
+            point.altitude - origin.altitude
+        } else {
+            0.0
+        }
         return Enu(east = east, north = north, up = up)
     }
 

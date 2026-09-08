@@ -118,7 +118,7 @@ class FarViewPlacementTest {
         assertEquals(300.0, farPlan.realDistanceM!!, 0.5)
         assertEquals(
             viewDistanceFor(15f).toDouble(),
-            GeoMath.distanceMeters(farPlan.standoffOrigin!!, centroid),
+            GeoMath.distanceMeters(farPlan.standoff!!.originGeo, centroid),
             0.5,
         )
     }
@@ -144,5 +144,79 @@ class FarViewPlacementTest {
         val plan = farViewPlan(centroid, viewer, 15f, wasFarAway = false)
 
         assertEquals(300.0, plan.roundedDistanceM!!, 0.001)
+    }
+
+    /**
+     * A node under an anchor is drawn at the anchor's own world position plus its ENU
+     * offset from the calibration origin, so the two have to be picked as a pair. This
+     * is where the solid ended up on top of the viewer: an origin that says "you" while
+     * the anchor says something else puts the model wherever the mismatch lands.
+     */
+    private fun drawnOffsetFromViewer(
+        anchorGeo: LatLngAlt,
+        originGeo: LatLngAlt,
+        point: LatLngAlt,
+        viewer: LatLngAlt,
+    ): Pair<Double, Double> {
+        val anchorAt = GeoMath.toEnu(viewer, anchorGeo)
+        val offset = ReferenceCalibration(originGeo = originGeo, yawDegrees = 0.0).enuOf(point)
+        return (anchorAt.east + offset.east) to (anchorAt.north + offset.north)
+    }
+
+    @Test
+    fun `a near model is drawn at its true offset in both placement modes`() {
+        val viewer = GeoMath.destination(centroid, 20.0, 60.0)
+        val truth = GeoMath.toEnu(viewer, centroid)
+
+        // GPS anchors at your feet and measures from your fix.
+        val gps = drawnOffsetFromViewer(viewer, viewer, centroid, viewer)
+        assertEquals(truth.east, gps.first, 0.2)
+        assertEquals(truth.north, gps.second, 0.2)
+
+        // Geospatial anchors the model's own place, which is absolute.
+        val geospatial = drawnOffsetFromViewer(centroid, centroid, centroid, viewer)
+        assertEquals(truth.east, geospatial.first, 0.2)
+        assertEquals(truth.north, geospatial.second, 0.2)
+    }
+
+    @Test
+    fun `a far model lands at the standoff in both placement modes`() {
+        val viewer = GeoMath.destination(centroid, 20.0, 300.0)
+        val plan = farViewPlan(centroid, viewer, halfExtentM = 15f, wasFarAway = false)
+        val standoff = plan.standoff!!
+        val realBearing = GeoMath.bearingDegrees(viewer, centroid)
+
+        // Both modes anchor next to you and measure the model from the standoff origin.
+        listOf(
+            "gps" to drawnOffsetFromViewer(viewer, standoff.originGeo, centroid, viewer),
+            "geospatial" to
+                drawnOffsetFromViewer(standoff.viewerGeo, standoff.originGeo, centroid, viewer),
+        ).forEach { (mode, drawn) ->
+            val (east, north) = drawn
+            assertEquals(
+                "$mode drew it at the wrong distance",
+                viewDistanceFor(15f).toDouble(),
+                sqrt(east * east + north * north),
+                0.5,
+            )
+            assertEquals(
+                "$mode drew it on the wrong bearing",
+                realBearing,
+                (Math.toDegrees(atan2(east, north)) + 360.0) % 360.0,
+                0.5,
+            )
+        }
+    }
+
+    /** Anchoring the standoff origin instead would leave the model 300 m away. */
+    @Test
+    fun `anchoring the standoff origin would not bring the model closer`() {
+        val viewer = GeoMath.destination(centroid, 20.0, 300.0)
+        val standoff = farViewPlan(centroid, viewer, 15f, wasFarAway = false).standoff!!
+
+        val (east, north) =
+            drawnOffsetFromViewer(standoff.originGeo, standoff.originGeo, centroid, viewer)
+
+        assertEquals(300.0, sqrt(east * east + north * north), 1.0)
     }
 }

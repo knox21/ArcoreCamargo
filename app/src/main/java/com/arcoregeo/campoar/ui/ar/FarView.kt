@@ -39,14 +39,23 @@ internal fun farViewOrigin(
 )
 
 /**
- * How the solid is placed this frame: [standoffOrigin] is set only when the model is
- * too far to be seen where it really is, and is then the ENU origin to draw it from.
+ * A drawn point stands for [originGeo] and sits where [viewerGeo] really is, so the
+ * model lands [viewDistanceFor] metres away on its real bearing, keeping its heading.
+ */
+internal data class Standoff(
+    val originGeo: LatLngAlt,
+    val viewerGeo: LatLngAlt,
+)
+
+/**
+ * How the solid is placed this frame. [standoff] is only set when the model is too
+ * far away to be seen where it really is.
  */
 internal data class FarViewPlan(
     val realDistanceM: Double?,
-    val standoffOrigin: LatLngAlt?,
+    val standoff: Standoff?,
 ) {
-    val farAway: Boolean get() = standoffOrigin != null
+    val farAway: Boolean get() = standoff != null
 
     /** Rounded so walking a step does not recompose the HUD. */
     val roundedDistanceM: Double?
@@ -70,10 +79,13 @@ internal fun farViewPlan(
     if (distance <= threshold) return FarViewPlan(distance, null)
     return FarViewPlan(
         realDistanceM = distance,
-        standoffOrigin = farViewOrigin(
-            centroid = centroid,
-            viewer = viewer,
-            standoffM = viewDistanceFor(halfExtentM).toDouble(),
+        standoff = Standoff(
+            originGeo = farViewOrigin(
+                centroid = centroid,
+                viewer = viewer,
+                standoffM = viewDistanceFor(halfExtentM).toDouble(),
+            ),
+            viewerGeo = viewer,
         ),
     )
 }

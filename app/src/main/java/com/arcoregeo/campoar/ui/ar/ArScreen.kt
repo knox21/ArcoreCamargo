@@ -98,8 +98,21 @@ private const val MAX_AR_MARKERS = 120
 private const val AR_NEAR_M = 0.1f
 private const val AR_FAR_M = 2_000f
 
+/**
+ * Re-deriving the placement from GPS rebuilds the model and re-snaps it with the fix's
+ * own noise, while doing nothing leaves ARCore tracking in charge — which is steadier.
+ * So it is only redone when the fix has something new to say.
+ */
+private const val REANCHOR_MOVE_M = 8.0
+private const val REANCHOR_TURN_DEG = 8f
+
 /** How the virtual content is currently anchored to the real world. */
 enum class Placement { None, Gps, Geospatial, Manual, Local }
+
+/** Whether the document has any place on Earth to be drawn at. */
+private val KmzDocument.hasGeoReference: Boolean
+    get() = meshOrigin != null || polygons.isNotEmpty() || points.isNotEmpty() ||
+        lines.isNotEmpty()
 
 /**
  * How the solid was last placed. Rebuilding the model costs a frame, so the placement
@@ -108,7 +121,7 @@ enum class Placement { None, Gps, Geospatial, Manual, Local }
 private class PlacementMemo {
     private var fix: LatLngAlt? = null
     private var yaw = 0.0
-    private var earthTarget: LatLngAlt? = null
+    private var earthAnchor: LatLngAlt? = null
 
     var farAway = false
         private set
@@ -116,8 +129,8 @@ private class PlacementMemo {
     fun gpsMoved(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean): Boolean {
         val previous = fix ?: return true
         return newFarAway != farAway ||
-            GeoMath.distanceMeters(previous, coordinate) > 1.5 ||
-            abs(GeoMath.wrappedDeltaDegrees(yaw, newYaw)) > 8f
+            GeoMath.distanceMeters(previous, coordinate) > REANCHOR_MOVE_M ||
+            abs(GeoMath.wrappedDeltaDegrees(yaw, newYaw)) > REANCHOR_TURN_DEG
     }
 
     fun rememberGps(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean) {
@@ -126,14 +139,14 @@ private class PlacementMemo {
         farAway = newFarAway
     }
 
-    /** Earth anchors are absolute, so one is only replaced when its target moves. */
-    fun earthTargetMoved(target: LatLngAlt, newFarAway: Boolean): Boolean {
-        val previous = earthTarget ?: return true
-        return newFarAway != farAway || GeoMath.distanceMeters(previous, target) > 5.0
+    fun earthMoved(anchorGeo: LatLngAlt, newFarAway: Boolean): Boolean {
+        val previous = earthAnchor ?: return true
+        return newFarAway != farAway ||
+            GeoMath.distanceMeters(previous, anchorGeo) > REANCHOR_MOVE_M
     }
 
-    fun rememberEarth(target: LatLngAlt, newFarAway: Boolean) {
-        earthTarget = target
+    fun rememberEarth(anchorGeo: LatLngAlt, newFarAway: Boolean) {
+        earthAnchor = anchorGeo
         farAway = newFarAway
     }
 }
@@ -333,13 +346,18 @@ fun ArScreen(
                         showSolid = showSolid,
                         polygonCount = document.polygons.size,
                     )
-                    if (document.localMeshes.isNotEmpty() &&
-                        document.meshOrigin == null &&
-                        document.polygons.isNotEmpty()
-                    ) {
-                        Text(
+                    val placementHint = when {
+                        document.localMeshes.isEmpty() || document.meshOrigin != null -> null
+                        document.polygons.isNotEmpty() ->
                             "Mostrando el contorno georreferenciado · reimporta el IFC " +
-                                "para ver la malla real en su sitio",
+                                "para ver la malla real en su sitio"
+                        else ->
+                            "Este IFC no trae georreferencia (sin IfcMapConversion ni " +
+                                "coordenadas de IfcSite) · se dibuja delante de ti, no en su sitio"
+                    }
+                    placementHint?.let { hint ->
+                        Text(
+                            hint,
                             color = Color(0xFFBFDBFE),
                             fontSize = 12.sp,
                             modifier = Modifier
@@ -449,7 +467,7 @@ fun ArScreen(
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                         )
                     }
-                    if (targets.isEmpty()) {
+                    if (targets.isEmpty() && document.localMeshes.isEmpty()) {
                         Text(
                             "No hay coordenadas para AR. Reimporta el KMZ/KML.",
                             color = Color(0xFFF87171),
@@ -615,6 +633,7 @@ private fun ArWorldScene(
     val livePlacement by rememberUpdatedState(placement)
     val liveCalib by rememberUpdatedState(activeCalib)
     val liveGpsLocked by rememberUpdatedState(gpsLocked)
+    val liveGeoReferenced by rememberUpdatedState(document.hasGeoReference)
 
     fun replaceAnchor(anchor: Anchor, calib: ReferenceCalibration, mode: Placement) {
         // Manual anchors belong to ArScreen, which detaches them on "Quitar ancla".
@@ -800,19 +819,9 @@ private fun ArWorldScene(
             val centroid = liveCentroid
             val devicePose = livePose
 
-            if (liveResumeGps != handledResumeGps) {
-                handledResumeGps = liveResumeGps
-                if (livePlacement == Placement.Local) {
-                    activeAnchor?.detach()
-                    activeAnchor = null
-                    activeCalib = null
-                    placement = Placement.None
-                    onPlacementChanged(Placement.None)
-                }
-            }
-
-            if (liveBringHere != handledBringHere && cameraReady && centroid != null) {
-                handledBringHere = liveBringHere
+            // Stands the solid in front of the camera, whole and at a readable size.
+            // The origin is only read for georeferenced geometry, which this is not.
+            fun placeInFront() {
                 val camPose = camera.pose
                 val forward = camPose.zAxis
                 val viewDistance = viewDistanceFor(liveHalfExtent)
@@ -824,14 +833,42 @@ private fun ArWorldScene(
                 runCatching { session.createAnchor(front) }.getOrNull()?.let { anchor ->
                     replaceAnchor(
                         anchor,
-                        ReferenceCalibration(originGeo = centroid, yawDegrees = 0.0, refCount = 0),
+                        ReferenceCalibration(
+                            originGeo = centroid ?: devicePose?.coordinate ?: LatLngAlt(0.0, 0.0),
+                            yawDegrees = 0.0,
+                            refCount = 0,
+                        ),
                         Placement.Local,
                     )
                 }
             }
 
+            if (liveResumeGps != handledResumeGps) {
+                handledResumeGps = liveResumeGps
+                if (livePlacement == Placement.Local && liveGeoReferenced) {
+                    activeAnchor?.detach()
+                    activeAnchor = null
+                    activeCalib = null
+                    placement = Placement.None
+                    onPlacementChanged(Placement.None)
+                }
+            }
+
+            if (liveBringHere != handledBringHere && cameraReady) {
+                handledBringHere = liveBringHere
+                placeInFront()
+            }
+
             if (livePlacement == Placement.Manual || livePlacement == Placement.Local) {
                 farViewDistanceM = null
+                return@ARScene
+            }
+
+            // An IFC with no map conversion and no site coordinates has nowhere real to
+            // stand, so it goes in front of you instead of centred on the camera, which
+            // is what put the viewer inside the model.
+            if (!liveGeoReferenced) {
+                if (cameraReady && placement != Placement.Local) placeInFront()
                 return@ARScene
             }
             // Frozen GPS pose: do not chase new fixes (stops the solid from jumping).
@@ -861,28 +898,32 @@ private fun ArWorldScene(
                 geoAccuracy <= 25.0 &&
                 !liveGpsLocked
             if (geospatialOk) {
-                val target = plan.standoffOrigin ?: centroid
+                // An Earth anchor stands for its own place on the globe, so pulling a
+                // far model in means anchoring next to you and measuring the model from
+                // the standoff origin. Anchoring the origin itself would leave the
+                // model exactly where it really is, invisibly far away.
+                val anchorGeo = plan.standoff?.viewerGeo ?: centroid
+                val originGeo = plan.standoff?.originGeo ?: centroid
                 val stale = livePlacement != Placement.Geospatial ||
-                    lastPlacement.earthTargetMoved(target, plan.farAway)
-                if (!stale) {
-                    farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
-                    return@ARScene
-                }
+                    lastPlacement.earthMoved(anchorGeo, plan.farAway)
+                farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
+                if (!stale) return@ARScene
+
+                // Anchors sit on the ground, an eye height below the phone.
                 val altitude = (geoPose?.altitude ?: 0.0) - EYE_HEIGHT_M
                 val anchor = runCatching {
                     earth.createAnchor(
-                        target.latitude,
-                        target.longitude,
+                        anchorGeo.latitude,
+                        anchorGeo.longitude,
                         altitude,
                         0f, 0f, 0f, 1f,
                     )
                 }.getOrNull()
                 if (anchor != null) {
-                    lastPlacement.rememberEarth(target, plan.farAway)
-                    farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
+                    lastPlacement.rememberEarth(anchorGeo, plan.farAway)
                     replaceAnchor(
                         anchor,
-                        ReferenceCalibration(originGeo = target, yawDegrees = 0.0, refCount = 0),
+                        ReferenceCalibration(originGeo = originGeo, yawDegrees = 0.0, refCount = 0),
                         Placement.Geospatial,
                     )
                     return@ARScene
@@ -902,28 +943,30 @@ private fun ArWorldScene(
                     atan2(-forward[0].toDouble(), forward[2].toDouble()),
                 )
                 val yaw = devicePose.headingDegrees - forwardAngle
-                val originGeo = plan.standoffOrigin ?: devicePose.coordinate
+                val originGeo = plan.standoff?.originGeo ?: devicePose.coordinate
                 farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
-                val newCalib = ReferenceCalibration(
-                    originGeo = originGeo,
-                    yawDegrees = yaw,
-                    refCount = 0,
+
+                val stale = livePlacement != Placement.Gps ||
+                    lastPlacement.gpsMoved(devicePose.coordinate, yaw, plan.farAway)
+                if (!stale) return@ARScene
+
+                // The anchor is the world point that stands for the origin, so the two
+                // are always renewed together: keeping the old anchor while moving the
+                // origin counts your walk twice and slides the model away from you.
+                // Between renewals ARCore tracking is what holds the model in place,
+                // and it is far steadier than the GPS fix.
+                val groundPose = Pose.makeTranslation(
+                    camPose.tx(),
+                    camPose.ty() - EYE_HEIGHT_M,
+                    camPose.tz(),
                 )
-                if (livePlacement != Placement.Gps) {
-                    val groundPose = Pose.makeTranslation(
-                        camPose.tx(),
-                        camPose.ty() - EYE_HEIGHT_M,
-                        camPose.tz(),
-                    )
-                    runCatching { session.createAnchor(groundPose) }.getOrNull()?.let { anchor ->
-                        replaceAnchor(anchor, newCalib, Placement.Gps)
-                        lastPlacement.rememberGps(devicePose.coordinate, yaw, plan.farAway)
-                    }
-                } else if (lastPlacement.gpsMoved(devicePose.coordinate, yaw, plan.farAway)) {
-                    // Compared against the last fix, not against the calibration origin,
-                    // which in the far view sits next to the model instead of on you.
+                runCatching { session.createAnchor(groundPose) }.getOrNull()?.let { anchor ->
                     lastPlacement.rememberGps(devicePose.coordinate, yaw, plan.farAway)
-                    activeCalib = newCalib
+                    replaceAnchor(
+                        anchor,
+                        ReferenceCalibration(originGeo = originGeo, yawDegrees = yaw, refCount = 0),
+                        Placement.Gps,
+                    )
                 }
             }
         },
