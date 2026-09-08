@@ -17,6 +17,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -95,12 +96,16 @@ fun IfcViewerScreen(
                 .background(Color(0xFF0B1220)),
         ) {
             if (ready != null && ready.nodes.isNotEmpty()) {
-                ModelScene(
-                    engine = engine,
-                    modelLoader = modelLoader,
-                    materialLoader = materialLoader,
-                    build = ready,
-                )
+                // Keyed on the model so opening another document reframes the camera
+                // instead of keeping the previous building's orbit.
+                key(ready) {
+                    ModelScene(
+                        engine = engine,
+                        modelLoader = modelLoader,
+                        materialLoader = materialLoader,
+                        build = ready,
+                    )
+                }
             } else {
                 Text(
                     info,
