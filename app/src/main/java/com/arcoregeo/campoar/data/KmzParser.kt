@@ -35,7 +35,7 @@ object KmzParser {
         walkPlacemarks(root, points, lines, polygons)
         return KmzDocument(
             id = UUID.randomUUID().toString(),
-            fileName = fileName.substringAfterLast('/').substringAfterLast(':'),
+            fileName = FileNames.sanitize(fileName, "archivo.kml"),
             storedFileName = "",
             importedAtEpochMs = System.currentTimeMillis(),
             points = points,

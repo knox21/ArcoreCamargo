@@ -38,9 +38,8 @@ class MainActivity : ComponentActivity() {
             else -> intent?.data
         }
         if (uri != null) {
-            val name = intent?.getStringExtra(Intent.EXTRA_TITLE)
-                ?: uri.lastPathSegment
-                ?: "archivo.kmz"
+            // Prefer OpenableColumns via repository; EXTRA_TITLE / lastPathSegment are often msf:##.
+            val name = intent?.getStringExtra(Intent.EXTRA_TITLE).orEmpty()
             val mime = intent?.type ?: contentResolver.getType(uri)
             viewModel.importShared(uri, name, mime)
         }

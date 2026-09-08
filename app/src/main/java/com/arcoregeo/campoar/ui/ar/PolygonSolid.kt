@@ -4,11 +4,13 @@ import android.graphics.Color
 import com.arcoregeo.campoar.data.LatLngAlt
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.google.android.filament.Engine
+import com.google.android.filament.MaterialInstance
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
 import io.github.sceneview.geometries.Geometry
 import io.github.sceneview.loaders.MaterialLoader
+import io.github.sceneview.material.setParameter
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Size
 import io.github.sceneview.node.CubeNode
@@ -40,27 +42,26 @@ fun buildSolidNodes(
     val h = heightMeters.coerceAtLeast(0.5f)
     val yTop = y0 + h
 
-    val wallColor = Float4(0.98f, 0.55f, 0.18f, 1f)
-    val topColor = Float4(1f, 0.85f, 0.35f, 1f)
-    val bottomColor = Float4(0.55f, 0.75f, 0.95f, 1f)
+    // Bright + emissive so ARCore light estimation does not turn the solid black.
+    val wallColor = Float4(0.98f, 0.62f, 0.22f, 1f)
+    val topColor = Float4(1f, 0.90f, 0.40f, 1f)
+    val bottomColor = Float4(0.45f, 0.78f, 1f, 1f)
 
-    val wallMat = materialLoader.createColorInstance(wallColor, metallic = 0f, roughness = 0.55f, reflectance = 0.2f)
-    val topMat = materialLoader.createColorInstance(topColor, metallic = 0f, roughness = 0.45f, reflectance = 0.25f)
-    val bottomMat = materialLoader.createColorInstance(bottomColor, metallic = 0f, roughness = 0.5f, reflectance = 0.2f)
-    val edgeTopMat = materialLoader.createColorInstance(Color.parseColor("#FDE047"))
-    val edgeBottomMat = materialLoader.createColorInstance(Color.parseColor("#38BDF8"))
-    val postMat = materialLoader.createColorInstance(Color.parseColor("#F8FAFC"))
+    val wallMat = materialLoader.createArVisibleColor(wallColor)
+    val topMat = materialLoader.createArVisibleColor(topColor)
+    val bottomMat = materialLoader.createArVisibleColor(bottomColor)
+    val edgeTopMat = materialLoader.createArVisibleColor(Color.parseColor("#FDE047"))
+    val edgeBottomMat = materialLoader.createArVisibleColor(Color.parseColor("#38BDF8"))
+    val postMat = materialLoader.createArVisibleColor(Color.parseColor("#F8FAFC"))
 
     val nodes = mutableListOf<Node>()
 
-    // Exact walls (one quad per edge) — same footprint as the IFC polyline.
     buildWallGeometry(engine, base, y0, yTop, wallColor)?.let { geometry ->
         nodes += GeometryNode(engine, geometry, wallMat) {
             culling(false)
         }
     }
 
-    // Exact top / bottom caps (fan triangulation of the real ring).
     buildCapGeometry(engine, base, yTop, Float3(0f, 1f, 0f), topColor)?.let { geometry ->
         nodes += GeometryNode(engine, geometry, topMat) {
             culling(false)
@@ -72,7 +73,6 @@ fun buildSolidNodes(
         }
     }
 
-    // Bright edges so the IFC outline is obvious even in dim AR light.
     for (i in base.indices) {
         val a = base[i]
         val b = base[(i + 1) % base.size]
@@ -96,6 +96,24 @@ fun buildSolidNodes(
     return nodes
 }
 
+/** Lit color + soft emissive so the mesh stays readable under AR camera lighting. */
+fun MaterialLoader.createArVisibleColor(color: Float4): MaterialInstance {
+    val mat = createColorInstance(color, metallic = 0f, roughness = 0.92f, reflectance = 0f)
+    // Filament opaque_colored exposes "emissive" — keeps albedo visible without IBL.
+    mat.setParameter(
+        "emissive",
+        Float4(color.x * 0.55f, color.y * 0.55f, color.z * 0.55f, 0f),
+    )
+    return mat
+}
+
+fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
+    val r = ((colorInt shr 16) and 0xFF) / 255f
+    val g = ((colorInt shr 8) and 0xFF) / 255f
+    val b = (colorInt and 0xFF) / 255f
+    return createArVisibleColor(Float4(r, g, b, 1f))
+}
+
 private fun buildWallGeometry(
     engine: Engine,
     base: List<Float2>,
@@ -114,7 +132,6 @@ private fun buildWallGeometry(
         val ez = b.y - a.y
         val len = sqrt(ex * ex + ez * ez)
         if (len < 1e-4f) continue
-        // Outward-ish normal in XZ (double-sided indices make orientation safe).
         val nx = ez / len
         val nz = -ex / len
         val normal = Float3(nx, 0f, nz)
@@ -165,7 +182,7 @@ private fun beam(
     by: Float,
     bz: Float,
     thickness: Float,
-    material: com.google.android.filament.MaterialInstance,
+    material: MaterialInstance,
 ) {
     val dx = bx - ax
     val dy = by - ay

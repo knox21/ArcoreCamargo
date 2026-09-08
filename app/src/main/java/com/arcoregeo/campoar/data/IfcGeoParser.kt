@@ -226,7 +226,7 @@ object IfcGeoParser {
 
         return KmzDocument(
             id = UUID.randomUUID().toString(),
-            fileName = fileName.substringAfterLast('/').substringAfterLast(':'),
+            fileName = FileNames.sanitize(fileName, "modelo.ifc"),
             storedFileName = "",
             importedAtEpochMs = System.currentTimeMillis(),
             points = emptyList(),

@@ -124,6 +124,7 @@ fun ArScreen(
     var uiHidden by remember { mutableStateOf(false) }
     var placement by remember { mutableStateOf(Placement.None) }
     var bringHereTick by remember { mutableStateOf(0) }
+    var resumeGpsTick by remember { mutableStateOf(0) }
     var solidParts by remember { mutableStateOf(0) }
     var gpsLocked by remember { mutableStateOf(false) }
     var heightOffsetM by remember { mutableStateOf(0f) }
@@ -155,8 +156,18 @@ fun ArScreen(
     val selected = targets.firstOrNull { it.id == state.selectedPointId } ?: targets.firstOrNull()
     val pose = state.pose
     val solidCentroid = remember(document.id) {
-        document.polygons.firstOrNull()?.let { centroidOf(openRing(it.ring)) }
-            ?: targets.firstOrNull()?.coordinate
+        val allVerts = document.polygons.flatMap { openRing(it.ring) }
+        centroidOf(allVerts) ?: targets.firstOrNull()?.coordinate
+    }
+    val solidHalfExtentM = remember(document.id, solidCentroid) {
+        val c = solidCentroid ?: return@remember 15f
+        var maxD = 0.0
+        document.polygons.forEach { poly ->
+            openRing(poly.ring).forEach { p ->
+                maxD = maxOf(maxD, GeoMath.distanceMeters(c, p))
+            }
+        }
+        maxD.toFloat().coerceAtLeast(5f)
     }
 
     fun clearCalibration() {
@@ -240,12 +251,14 @@ fun ArScreen(
                     targets = targets,
                     document = document,
                     solidCentroid = solidCentroid,
+                    solidHalfExtentM = solidHalfExtentM,
                     showSolid = showSolid,
                     showMarkers = showMarkers,
                     calibration = calibration,
                     rootAnchor = rootAnchor,
                     pose = pose,
                     bringHereTick = bringHereTick,
+                    resumeGpsTick = resumeGpsTick,
                     gpsLocked = gpsLocked,
                     heightOffsetM = heightOffsetM,
                     onGeospatialStatus = onGeospatialStatus,
@@ -290,15 +303,22 @@ fun ArScreen(
                         onToggleMarkers = { showMarkers = !showMarkers },
                         onBringHere = {
                             bringHereTick += 1
-                            gpsLocked = true
-                            fixHint = "Modo demo: sólido delante (GPS anclado)"
+                            gpsLocked = false
+                            fixHint = "Demo: sólido a ~25–30 m delante (no es la posición GPS real)"
                         },
                         onToggleGpsLock = {
-                            gpsLocked = !gpsLocked
-                            fixHint = if (gpsLocked) {
-                                "GPS anclado · el sólido ya no salta con el GPS"
+                            if (placement == Placement.Local) {
+                                // Exit demo placement and resume real GPS/Geospatial distance.
+                                resumeGpsTick += 1
+                                gpsLocked = false
+                                fixHint = "GPS real: lejos se ve pequeño, cerca se ve grande"
                             } else {
-                                "GPS libre · el sólido sigue tu posición"
+                                gpsLocked = !gpsLocked
+                                fixHint = if (gpsLocked) {
+                                    "GPS anclado · el sólido ya no salta con el GPS"
+                                } else {
+                                    "GPS libre · lejos=pequeño, cerca=grande"
+                                }
                             }
                         },
                         onHeightUp = {
@@ -475,12 +495,14 @@ private fun ArWorldScene(
     targets: List<GeoPoint>,
     document: KmzDocument,
     solidCentroid: LatLngAlt?,
+    solidHalfExtentM: Float,
     showSolid: Boolean,
     showMarkers: Boolean,
     calibration: ReferenceCalibration?,
     rootAnchor: Anchor?,
     pose: DevicePose?,
     bringHereTick: Int,
+    resumeGpsTick: Int,
     gpsLocked: Boolean,
     heightOffsetM: Float,
     onGeospatialStatus: (Boolean, Double?, String?) -> Unit,
@@ -500,11 +522,14 @@ private fun ArWorldScene(
     var activeCalib by remember { mutableStateOf<ReferenceCalibration?>(null) }
     var placement by remember { mutableStateOf(Placement.None) }
     var handledBringHere by remember { mutableStateOf(0) }
+    var handledResumeGps by remember { mutableStateOf(0) }
 
     // The AR session callback outlives recompositions, so read the live values.
     val livePose by rememberUpdatedState(pose)
     val liveCentroid by rememberUpdatedState(solidCentroid)
+    val liveHalfExtent by rememberUpdatedState(solidHalfExtentM)
     val liveBringHere by rememberUpdatedState(bringHereTick)
+    val liveResumeGps by rememberUpdatedState(resumeGpsTick)
     val livePlacement by rememberUpdatedState(placement)
     val liveCalib by rememberUpdatedState(activeCalib)
     val liveGpsLocked by rememberUpdatedState(gpsLocked)
@@ -571,7 +596,7 @@ private fun ArWorldScene(
                             y = 0.8f + enu.up.toFloat(),
                             z = (-enu.north).toFloat(),
                         ),
-                        materialInstance = materialLoader.createColorInstance(
+                        materialInstance = materialLoader.createArVisibleColor(
                             android.graphics.Color.parseColor("#38BDF8"),
                         ),
                     ),
@@ -595,7 +620,7 @@ private fun ArWorldScene(
                             y = 1.0f + enu.up.toFloat(),
                             z = (-enu.north).toFloat(),
                         ),
-                        materialInstance = materialLoader.createColorInstance(
+                        materialInstance = materialLoader.createArVisibleColor(
                             android.graphics.Color.parseColor("#22C55E"),
                         ),
                     ),
@@ -627,7 +652,7 @@ private fun ArWorldScene(
         onGestureListener = gestureListener,
         sessionConfiguration = { session, config ->
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
-            config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
+            config.lightEstimationMode = Config.LightEstimationMode.DISABLED
             if (session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)) {
                 config.geospatialMode = Config.GeospatialMode.ENABLED
             }
@@ -650,14 +675,28 @@ private fun ArWorldScene(
             val centroid = liveCentroid
             val devicePose = livePose
 
+            if (liveResumeGps != handledResumeGps) {
+                handledResumeGps = liveResumeGps
+                if (livePlacement == Placement.Local) {
+                    activeAnchor?.detach()
+                    activeAnchor = null
+                    activeCalib = null
+                    placement = Placement.None
+                    onPlacementChanged(Placement.None)
+                }
+            }
+
             if (liveBringHere != handledBringHere && cameraReady && centroid != null) {
                 handledBringHere = liveBringHere
                 val camPose = camera.pose
                 val forward = camPose.zAxis
+                // Stand back so the full solid fits: ~25–30 m for small plots,
+                // further for large footprints (half-extent + margin).
+                val viewDistance = maxOf(25f, liveHalfExtent * 1.6f + 10f).coerceIn(25f, 70f)
                 val front = Pose.makeTranslation(
-                    camPose.tx() - forward[0] * 6f,
+                    camPose.tx() - forward[0] * viewDistance,
                     camPose.ty() - EYE_HEIGHT_M,
-                    camPose.tz() - forward[2] * 6f,
+                    camPose.tz() - forward[2] * viewDistance,
                 )
                 runCatching { session.createAnchor(front) }.getOrNull()?.let { anchor ->
                     replaceAnchor(
@@ -806,6 +845,14 @@ private fun ControlBar(
             }
             OutlinedButton(onClick = onBringHere, modifier = Modifier.height(40.dp)) {
                 Text("Traer aquí", color = Color.White, fontSize = 12.sp)
+            }
+            if (placement == Placement.Local) {
+                OutlinedButton(
+                    onClick = onToggleGpsLock,
+                    modifier = Modifier.height(40.dp),
+                ) {
+                    Text("GPS real", color = Color(0xFF86EFAC), fontSize = 12.sp)
+                }
             }
         }
         Row(
@@ -977,7 +1024,7 @@ private fun GpsRelativeHud(
         "rumbo ${bearing.toInt()}°"
     }
     val modeNote = when {
-        placement == Placement.Local -> "DEMO: ignorando GPS real"
+        placement == Placement.Local -> "DEMO ~25–30 m · pulsa GPS real para distancia GPS"
         gpsLocked -> "GPS ANCLADO · no salta"
         placement == Placement.Geospatial -> "posición Geospatial"
         placement == Placement.Gps -> "GPS libre (puede saltar)"

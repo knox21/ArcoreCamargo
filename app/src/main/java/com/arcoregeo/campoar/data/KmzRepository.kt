@@ -52,11 +52,22 @@ class KmzRepository(context: Context) {
         }.getOrNull()
     }
 
+    /** Prefer MediaStore display name; never keep SAF ids like `msf:39`. */
+    fun resolveDisplayName(uri: Uri, hint: String = "", fallback: String = "archivo"): String {
+        val fromProvider = queryDisplayName(uri)?.let { FileNames.sanitize(it, fallback) }
+        if (!fromProvider.isNullOrBlank() && !FileNames.looksLikeContentId(fromProvider) && fromProvider != fallback) {
+            return fromProvider
+        }
+        val fromHint = FileNames.sanitize(hint, fallback)
+        if (!FileNames.looksLikeContentId(fromHint) && fromHint != fallback) return fromHint
+        return fromProvider?.takeIf { it != fallback } ?: fromHint
+    }
+
     suspend fun importFromUri(uri: Uri, displayName: String): KmzDocument = withContext(Dispatchers.IO) {
         if (looksLikeIfc(uri, displayName)) {
             error("IFC_FILE")
         }
-        val resolvedName = displayName.ifBlank { queryDisplayName(uri) ?: "archivo.kml" }
+        val resolvedName = resolveDisplayName(uri, displayName, "archivo.kml")
         appContext.contentResolver.openInputStream(uri)?.use { stream ->
             importFromStream(resolvedName, stream)
         } ?: error("No se pudo abrir el archivo compartido")
@@ -64,7 +75,7 @@ class KmzRepository(context: Context) {
 
     /** Reads the georeferenced footprint out of an IFC solid. */
     suspend fun importIfcFromUri(uri: Uri, displayName: String): KmzDocument = withContext(Dispatchers.IO) {
-        val name = displayName.ifBlank { queryDisplayName(uri) ?: "modelo.ifc" }
+        val name = resolveDisplayName(uri, displayName, "modelo.ifc")
         val text = appContext.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() }
             ?: error("No se pudo abrir el IFC")
         store(IfcGeoParser.parse(name, text))

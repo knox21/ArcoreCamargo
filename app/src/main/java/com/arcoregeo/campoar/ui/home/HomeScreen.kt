@@ -52,7 +52,7 @@ fun HomeScreen(
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
-            onImport(uri, uri.lastPathSegment ?: "archivo.kmz")
+            onImport(uri, "")
         }
     }
 
