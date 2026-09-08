@@ -66,6 +66,8 @@ data class KmzDocument(
     val meshOrigin: LatLngAlt? = null,
     /** Rotation from the mesh local axes to true north, degrees counter-clockwise. */
     val meshRotationDeg: Float = 0f,
+    /** What the IFC reader extracted, dropped or could not read. */
+    val geometryNote: String? = null,
 ) {
     val featureCount: Int get() = points.size + lines.size + polygons.size + localMeshes.size
 

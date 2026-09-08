@@ -297,6 +297,166 @@ class IfcGeoParserTest {
         }
     }
 
+    /** IFC4 Revit exports describe curved solids as advanced BReps with edge loops. */
+    @Test
+    fun `reads an advanced brep face through its edge loop`() {
+        val ifc = """
+            ISO-10303-21;
+            DATA;
+            #1=IFCCARTESIANPOINT((0.,0.,0.));
+            #2=IFCCARTESIANPOINT((4.,0.,0.));
+            #3=IFCCARTESIANPOINT((4.,3.,0.));
+            #4=IFCCARTESIANPOINT((0.,3.,0.));
+            #11=IFCVERTEXPOINT(#1);
+            #12=IFCVERTEXPOINT(#2);
+            #13=IFCVERTEXPOINT(#3);
+            #14=IFCVERTEXPOINT(#4);
+            #21=IFCEDGECURVE(#11,#12,#31,.T.);
+            #22=IFCEDGECURVE(#12,#13,#31,.T.);
+            #23=IFCEDGECURVE(#13,#14,#31,.T.);
+            #24=IFCEDGECURVE(#14,#11,#31,.T.);
+            #41=IFCORIENTEDEDGE(*,*,#21,.T.);
+            #42=IFCORIENTEDEDGE(*,*,#22,.T.);
+            #43=IFCORIENTEDEDGE(*,*,#23,.T.);
+            #44=IFCORIENTEDEDGE(*,*,#24,.T.);
+            #51=IFCEDGELOOP((#41,#42,#43,#44));
+            #52=IFCFACEOUTERBOUND(#51,.T.);
+            #53=IFCADVANCEDFACE((#52),#60,.T.);
+            #54=IFCCLOSEDSHELL((#53));
+            #55=IFCADVANCEDBREP(#54);
+            #56=IFCSHAPEREPRESENTATION(${'$'},'Body','AdvancedBrep',(#55));
+            #57=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#56));
+            #58=IFCSLAB('slab',${'$'},'Losa curva',${'$'},${'$'},${'$'},#57,${'$'},.FLOOR.);
+            ENDSEC;
+            END-ISO-10303-21;
+        """.trimIndent()
+
+        val doc = IfcGeoParser.parse("advanced.ifc", ifc)
+        assertEquals(4, doc.localMeshes.sumOf { it.vertices.size })
+        assertTrue(doc.localMeshes.first().indices.size >= 6)
+    }
+
+    /** Structural models are full of steel sections the reader has no exact profile for. */
+    @Test
+    fun `approximates a parametric steel profile with its overall size`() {
+        val ifc = """
+            ISO-10303-21;
+            DATA;
+            #1=IFCCARTESIANPOINT((0.,0.,0.));
+            #2=IFCDIRECTION((0.,0.,1.));
+            #3=IFCAXIS2PLACEMENT3D(#1,${'$'},${'$'});
+            #4=IFCISHAPEPROFILEDEF(.AREA.,'W310X39',${'$'},0.3,0.6,0.012,0.019,0.01);
+            #5=IFCEXTRUDEDAREASOLID(#4,#3,#2,4.);
+            #6=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#5));
+            #7=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#6));
+            #8=IFCCOLUMN('col',${'$'},'Columna W310',${'$'},${'$'},${'$'},#7,${'$'});
+            ENDSEC;
+            END-ISO-10303-21;
+        """.trimIndent()
+
+        val doc = IfcGeoParser.parse("acero.ifc", ifc)
+        val verts = doc.localMeshes.flatMap { it.vertices }
+        assertTrue("no geometry", verts.isNotEmpty())
+        val width = verts.maxOf { it.x } - verts.minOf { it.x }
+        val height = verts.maxOf { it.y } - verts.minOf { it.y }
+        assertEquals(0.3, width.toDouble(), 0.01)
+        assertEquals(4.0, height.toDouble(), 0.01)
+    }
+
+    /** One solid with a broken placement used to blow up the whole scene framing. */
+    @Test
+    fun `drops solids placed thousands of kilometres away`() {
+        val ifc = buildString {
+            appendLine("ISO-10303-21;")
+            appendLine("DATA;")
+            appendLine("#1=IFCCARTESIANPOINT((0.,0.,0.));")
+            appendLine("#2=IFCDIRECTION((0.,0.,1.));")
+            appendLine("#3=IFCAXIS2PLACEMENT3D(#1,${'$'},${'$'});")
+            var id = 10
+            listOf(0.0, 4.0, 8.0, 12.0, 9.0e6).forEach { x ->
+                val point = id++
+                val place = id++
+                val local = id++
+                val profile = id++
+                val solid = id++
+                val rep = id++
+                val shape = id++
+                val wall = id++
+                appendLine("#$point=IFCCARTESIANPOINT(($x,0.,0.));")
+                appendLine("#$place=IFCAXIS2PLACEMENT3D(#$point,${'$'},${'$'});")
+                appendLine("#$local=IFCLOCALPLACEMENT(${'$'},#$place);")
+                appendLine("#$profile=IFCRECTANGLEPROFILEDEF(.AREA.,${'$'},${'$'},2.,0.3);")
+                appendLine("#$solid=IFCEXTRUDEDAREASOLID(#$profile,#3,#2,2.7);")
+                appendLine("#$rep=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#$solid));")
+                appendLine("#$shape=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#$rep));")
+                appendLine("#$wall=IFCWALL('w$x',${'$'},'Muro',${'$'},${'$'},#$local,#$shape,${'$'});")
+            }
+            appendLine("ENDSEC;")
+            appendLine("END-ISO-10303-21;")
+        }
+
+        val doc = IfcGeoParser.parse("roto.ifc", ifc)
+        val maxAbs = doc.localMeshes.flatMap { it.vertices }.maxOf { abs(it.x) }
+        assertTrue("outlier kept: $maxAbs", maxAbs < 1_000f)
+        assertTrue("note was ${doc.geometryNote}", doc.geometryNote!!.contains("fuera de rango"))
+    }
+
+    /** Round columns and domes are revolved profiles, not extrusions. */
+    @Test
+    fun `revolves a profile around its axis`() {
+        val ifc = """
+            ISO-10303-21;
+            DATA;
+            #1=IFCCARTESIANPOINT((0.,0.,0.));
+            #2=IFCDIRECTION((0.,0.,1.));
+            #3=IFCAXIS2PLACEMENT3D(#1,${'$'},${'$'});
+            #4=IFCCARTESIANPOINT((5.,0.));
+            #5=IFCDIRECTION((1.,0.));
+            #6=IFCAXIS2PLACEMENT2D(#4,#5);
+            #7=IFCRECTANGLEPROFILEDEF(.AREA.,'Anillo',#6,1.,2.);
+            #8=IFCAXIS1PLACEMENT(#1,#13);
+            #13=IFCDIRECTION((0.,1.,0.));
+            #9=IFCREVOLVEDAREASOLID(#7,#3,#8,6.28318530718);
+            #10=IFCSHAPEREPRESENTATION(${'$'},'Body','Revolved',(#9));
+            #11=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#10));
+            #12=IFCBUILDINGELEMENTPROXY('p',${'$'},'Cúpula',${'$'},${'$'},${'$'},#11,${'$'},.USERDEFINED.);
+            ENDSEC;
+            END-ISO-10303-21;
+        """.trimIndent()
+
+        val doc = IfcGeoParser.parse("revolucion.ifc", ifc)
+        val verts = doc.localMeshes.flatMap { it.vertices }
+        assertTrue("no geometry", verts.isNotEmpty())
+
+        // Revolving around the model Y axis leaves a ring of radius 4.5–5.5 on the
+        // model XZ plane (scene X/Y) and the 2 m profile depth along the axis.
+        val radii = verts.map { kotlin.math.sqrt((it.x * it.x + it.y * it.y).toDouble()) }
+        assertEquals(5.5, radii.max(), 0.05)
+        assertEquals(4.5, radii.min(), 0.05)
+        assertEquals(2.0, (verts.maxOf { it.z } - verts.minOf { it.z }).toDouble(), 0.05)
+    }
+
+    /** The import error has to name what was in the file, or a failure is unfixable. */
+    @Test
+    fun `reports the geometry types it could not read`() {
+        val ifc = """
+            ISO-10303-21;
+            DATA;
+            #1=IFCCARTESIANPOINT((0.,0.,0.));
+            #2=IFCSWEPTDISKSOLID(#10,0.05,${'$'},0.,1.);
+            #3=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptDiskSolid',(#2));
+            #4=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#3));
+            #5=IFCFLOWSEGMENT('c',${'$'},'Tubería',${'$'},${'$'},${'$'},#4,${'$'});
+            ENDSEC;
+            END-ISO-10303-21;
+        """.trimIndent()
+
+        val message = runCatching { IfcGeoParser.parse("tuberia.ifc", ifc) }
+            .exceptionOrNull()?.message.orEmpty()
+        assertTrue("message was $message", message.contains("SWEPTDISKSOLID"))
+        assertTrue("message was $message", message.contains("1 elementos"))
+    }
+
     /**
      * AR places the mesh by rotating it [KmzDocument.meshRotationDeg] around the up
      * axis and offsetting it to [KmzDocument.meshOrigin]. That has to land exactly

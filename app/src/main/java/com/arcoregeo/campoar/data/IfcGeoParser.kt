@@ -30,6 +30,12 @@ object IfcGeoParser {
     private const val MAX_CHUNK_VERTICES = 30_000
     private const val MAX_FOOTPRINTS = 60
 
+    /** Distance from the model core past which a solid is treated as a placement error. */
+    private const val MAX_MESH_SPREAD_M = 10_000.0
+
+    /** Segments used to approximate a revolved solid. */
+    private const val REVOLVE_STEPS = 12
+
     private class Entity(val type: String, val argsRaw: String) {
         private var parsed: List<String>? = null
         val args: List<String>
@@ -40,6 +46,9 @@ object IfcGeoParser {
     private class Model {
         val entities = HashMap<Int, Entity>()
         val coords = HashMap<Int, DoubleArray>()
+
+        /** Representation items and profiles this reader cannot draw yet, for reporting. */
+        val unsupported = HashMap<String, Int>()
 
         fun entity(id: Int?): Entity? = id?.let { entities[it] }
         fun coord(id: Int?): DoubleArray? = id?.let { coords[it] }
@@ -161,15 +170,14 @@ object IfcGeoParser {
         }
 
         // Sorted by STEP id so a truncated model is always the same subset.
-        val products = model.entities.entries
-            .filter { it.value.type in PRODUCT_TYPES }
-            .sortedBy { it.key }
-            .take(MAX_PRODUCTS)
+        val allProducts = model.entities.entries.filter { it.value.type in PRODUCT_TYPES }
+        val products = allProducts.sortedBy { it.key }.take(MAX_PRODUCTS)
+
+        val siteWorld = model.entities.values.firstOrNull { it.type == "IFCSITE" }
+            ?.args?.getOrNull(5)?.let { placementWorldTranslation(model, refId(it)) }
+            ?: LocalPoint3(0.0, 0.0, 0.0)
 
         if (products.isNotEmpty()) {
-            val siteWorld = model.entities.values.firstOrNull { it.type == "IFCSITE" }
-                ?.args?.getOrNull(5)?.let { placementWorldTranslation(model, refId(it)) }
-                ?: LocalPoint3(0.0, 0.0, 0.0)
             // Cancel huge site engineering coords; keep building-local meters.
             val originCancel = Mat4.translation(-siteWorld.x, -siteWorld.y, -siteWorld.z)
 
@@ -234,14 +242,31 @@ object IfcGeoParser {
         }
 
         if (meshes.isEmpty()) {
+            val found = model.unsupported.entries.sortedByDescending { it.value }.take(3)
+                .joinToString(", ") { "${it.key.removePrefix("IFC")}×${it.value}" }
             error(
-                "No se pudo extraer geometría 3D del IFC. " +
-                    "Soporta edificios Revit (muros/losas/columnas con ExtrudedAreaSolid), " +
-                    "BooleanClipping, MappedItem, TriangulatedFaceSet y PolygonalFaceSet.",
+                buildString {
+                    append("No se pudo extraer geometría 3D del IFC ")
+                    append("(${allProducts.size} elementos, ${model.entities.size} entidades). ")
+                    if (found.isNotEmpty()) append("Geometría no soportada: $found.")
+                    else append("El archivo no trae sólidos ni mallas legibles.")
+                },
             )
         }
 
-        val merged = mergeMeshes(meshes)
+        val sane = sanitizeMeshes(meshes)
+        val merged = mergeMeshes(sane)
+        val note = buildString {
+            append("${sane.size} sólido(s) de ${allProducts.size} elementos")
+            if (allProducts.size > MAX_PRODUCTS) append(" · leídos los primeros $MAX_PRODUCTS")
+            if (vertexBudget <= 0) append(" · recortado a $MAX_TOTAL_VERTICES vértices")
+            if (meshes.size > sane.size) append(" · ${meshes.size - sane.size} fuera de rango")
+            val unread = model.unsupported.entries.sortedByDescending { it.value }.take(3)
+            if (unread.isNotEmpty()) {
+                append(" · sin soporte: ")
+                append(unread.joinToString(", ") { "${it.key.removePrefix("IFC")}×${it.value}" })
+            }
+        }
 
         val mapConversion = readMapConversion(model)
         val site = model.entities.values.firstOrNull { it.type == "IFCSITE" }
@@ -261,7 +286,9 @@ object IfcGeoParser {
             footprints.map { (name, ring2) ->
                 val ring = ring2.map { p ->
                     when {
-                        mapConversion != null -> mapConversion.toLatLng(p.x, p.y)
+                        // Rings are site-local; the map conversion expects model coords.
+                        mapConversion != null ->
+                            mapConversion.toLatLng(p.x + siteWorld.x, p.y + siteWorld.y)
                         else -> fromEnu(siteOrigin!!, p.x, p.y)
                     }
                 }
@@ -287,8 +314,9 @@ object IfcGeoParser {
             sourceKind = "ifc",
             isGeoreferenced = georeferenced && polygons.isNotEmpty(),
             localMeshes = merged,
-            meshOrigin = mapConversion?.toLatLng(0.0, 0.0) ?: siteOrigin,
+            meshOrigin = mapConversion?.toLatLng(siteWorld.x, siteWorld.y) ?: siteOrigin,
             meshRotationDeg = mapConversion?.let { modelToNorthDegrees(it) } ?: 0f,
+            geometryNote = note,
         )
     }
 
@@ -302,11 +330,15 @@ object IfcGeoParser {
     ): List<Triple<LocalMesh, List<LocalPoint2>?, Float?>> {
         val entity = model.entity(id) ?: return emptyList()
         return when (entity.type) {
-            "IFCEXTRUDEDAREASOLID" -> extractExtruded(model, entity, transform, name)
+            "IFCEXTRUDEDAREASOLID", "IFCEXTRUDEDAREASOLIDTAPERED" ->
+                extractExtruded(model, entity, transform, name)
+            "IFCREVOLVEDAREASOLID", "IFCREVOLVEDAREASOLIDTAPERED" ->
+                extractRevolved(model, entity, transform, name)
             "IFCBOOLEANCLIPPINGRESULT", "IFCBOOLEANRESULT" -> {
                 // FirstOperand is the main solid; SecondOperand is the void/clip.
                 extractSolidMeshes(model, refId(entity.args.getOrNull(1)), transform, name)
             }
+            "IFCCSGSOLID" -> extractSolidMeshes(model, refId(entity.args.getOrNull(0)), transform, name)
             "IFCMAPPEDITEM" -> {
                 val source = model.entity(refId(entity.args.getOrNull(0)))
                 val target = model.entity(refId(entity.args.getOrNull(1)))
@@ -325,15 +357,18 @@ object IfcGeoParser {
             "IFCPOLYGONALFACESET" -> listOfNotNull(
                 polygonalFaceSetToMesh(model, entity, transform, name)?.let { Triple(it, null, null) },
             )
-            "IFCFACETEDBREP", "IFCFACETEDBREPWITHVOIDS" -> {
+            // Every manifold BRep flavour: the first reference is its outer shell.
+            "IFCFACETEDBREP", "IFCFACETEDBREPWITHVOIDS", "IFCMANIFOLDSOLIDBREP",
+            "IFCADVANCEDBREP", "IFCADVANCEDBREPWITHVOIDS",
+            -> {
                 val shell = model.entity(refId(entity.args.firstOrNull { it.startsWith("#") }))
-                facetedBrepToMesh(model, shell, transform, name)?.let {
+                shellToMesh(model, shell, transform, name)?.let {
                     listOf(Triple(it, null, null))
                 } ?: emptyList()
             }
-            "IFCSHELLBASEDSURFACEMODEL" -> {
+            "IFCSHELLBASEDSURFACEMODEL", "IFCFACEBASEDSURFACEMODEL" -> {
                 splitArgs(entity.args.firstOrNull()?.trim('(', ')').orEmpty()).flatMap { shellRef ->
-                    facetedBrepToMesh(model, model.entity(refId(shellRef)), transform, name)
+                    shellToMesh(model, model.entity(refId(shellRef)), transform, name)
                         ?.let { listOf(Triple(it, null as List<LocalPoint2>?, null as Float?)) }
                         ?: emptyList()
                 }
@@ -343,7 +378,10 @@ object IfcGeoParser {
                 if (item != null && item != "\$") extractSolidMeshes(model, refId(item), transform, name)
                 else emptyList()
             }
-            else -> emptyList()
+            else -> {
+                model.unsupported[entity.type] = (model.unsupported[entity.type] ?: 0) + 1
+                emptyList()
+            }
         }
     }
 
@@ -372,6 +410,119 @@ object IfcGeoParser {
         val mesh = extrudedPrismMesh(name, base, top)
         val footprint = base.map { LocalPoint2(it.x, it.y) }
         return listOf(Triple(mesh, footprint, depth.toFloat()))
+    }
+
+    /**
+     * IfcRevolvedAreaSolid: the profile is swept around an axis. Approximated with
+     * [REVOLVE_STEPS] flat segments, which is plenty for a solid seen on site.
+     */
+    private fun extractRevolved(
+        model: Model,
+        solid: Entity,
+        productTransform: Mat4,
+        name: String,
+    ): List<Triple<LocalMesh, List<LocalPoint2>?, Float?>> {
+        val profile = model.entity(refId(solid.args.getOrNull(0))) ?: return emptyList()
+        val ring2 = readProfileRing(profile, model) ?: return emptyList()
+        if (ring2.size < 3) return emptyList()
+
+        val axis = model.entity(refId(solid.args.getOrNull(2)))
+        val axisOrigin = cartesian3(model, refId(axis?.args?.getOrNull(0)))
+            ?: LocalPoint3(0.0, 0.0, 0.0)
+        val axisDir = normalize(
+            direction3(model, refId(axis?.args?.getOrNull(1))) ?: LocalPoint3(0.0, 0.0, 1.0),
+        )
+        val rawAngle = solid.args.getOrNull(3)?.toDoubleOrNull() ?: return emptyList()
+        // Angle units depend on the file's unit assignment; a full turn is 2π rad.
+        val angle = if (abs(rawAngle) > 2 * PI + 0.02) Math.toRadians(rawAngle) else rawAngle
+        if (abs(angle) < 1e-6) return emptyList()
+
+        val world = productTransform.mul(
+            axis2Placement3dMatrix(model, refId(solid.args.getOrNull(1))),
+        )
+        val rings = (0..REVOLVE_STEPS).map { step ->
+            val theta = angle * step / REVOLVE_STEPS
+            ring2.map { p ->
+                val local = rotateAround(LocalPoint3(p.x, p.y, 0.0), axisOrigin, axisDir, theta)
+                world.transform(local)
+            }
+        }
+
+        val vertices = mutableListOf<Vec3f>()
+        val indices = mutableListOf<Int>()
+        for (step in 0 until REVOLVE_STEPS) {
+            appendWalls(vertices, indices, rings[step], rings[step + 1])
+        }
+        val closed = abs(abs(angle) - 2 * PI) < 1e-3
+        if (!closed) {
+            appendCap(vertices, indices, rings.first())
+            appendCap(vertices, indices, rings.last())
+        }
+        if (indices.isEmpty()) return emptyList()
+
+        val heights = rings.flatten().map { it.z }
+        val height = (heights.max() - heights.min()).toFloat()
+        return listOf(Triple(LocalMesh(name, vertices, indices), null, height.takeIf { it > 0f }))
+    }
+
+    /** Rotates [p] by [radians] around the line through [origin] along unit [axis]. */
+    private fun rotateAround(
+        p: LocalPoint3,
+        origin: LocalPoint3,
+        axis: LocalPoint3,
+        radians: Double,
+    ): LocalPoint3 {
+        val v = LocalPoint3(p.x - origin.x, p.y - origin.y, p.z - origin.z)
+        val c = cos(radians)
+        val s = sin(radians)
+        val dot = v.x * axis.x + v.y * axis.y + v.z * axis.z
+        val crossed = cross(axis, v)
+        return LocalPoint3(
+            origin.x + v.x * c + crossed.x * s + axis.x * dot * (1 - c),
+            origin.y + v.y * c + crossed.y * s + axis.y * dot * (1 - c),
+            origin.z + v.z * c + crossed.z * s + axis.z * dot * (1 - c),
+        )
+    }
+
+    private fun appendWalls(
+        vertices: MutableList<Vec3f>,
+        indices: MutableList<Int>,
+        base: List<LocalPoint3>,
+        top: List<LocalPoint3>,
+    ) {
+        for (i in base.indices) {
+            val j = (i + 1) % base.size
+            val at = vertices.size
+            vertices += toScene(base[i])
+            vertices += toScene(base[j])
+            vertices += toScene(top[j])
+            vertices += toScene(top[i])
+            indices += listOf(at, at + 1, at + 2, at, at + 2, at + 3)
+            indices += listOf(at, at + 2, at + 1, at, at + 3, at + 2)
+        }
+    }
+
+    private fun appendCap(
+        vertices: MutableList<Vec3f>,
+        indices: MutableList<Int>,
+        pts: List<LocalPoint3>,
+    ) {
+        val center = vertices.size
+        vertices += toScene(
+            LocalPoint3(
+                pts.map { it.x }.average(),
+                pts.map { it.y }.average(),
+                pts.map { it.z }.average(),
+            ),
+        )
+        val rim = vertices.size
+        pts.forEach { vertices += toScene(it) }
+        for (i in pts.indices) {
+            val a = rim + i
+            val b = rim + (i + 1) % pts.size
+            indices += listOf(center, a, b)
+            indices += listOf(center, b, a)
+        }
     }
 
     private fun extrudedPrismMesh(
@@ -471,7 +622,8 @@ object IfcGeoParser {
 
     // --- Profile / curve readers -------------------------------------------------
 
-    private fun readProfileRing(profile: Entity, model: Model): List<LocalPoint2>? {
+    private fun readProfileRing(profile: Entity, model: Model, depth: Int = 0): List<LocalPoint2>? {
+        if (depth > 8) return null
         return when (profile.type) {
             "IFCARBITRARYCLOSEDPROFILEDEF",
             "IFCARBITRARYPROFILEDEFWITHVOIDS",
@@ -480,9 +632,30 @@ object IfcGeoParser {
                     ?: model.entity(refId(profile.args.lastOrNull()))
                 curve?.let { readCurve2d(it, model) }
             }
-            "IFCRECTANGLEPROFILEDEF", "IFCRECTANGLEHOLLOWPROFILEDEF" -> rectangleProfile(profile, model)
             "IFCCIRCLEPROFILEDEF", "IFCCIRCLEHOLLOWPROFILEDEF" -> circleProfile(profile, model)
-            else -> model.entity(refId(profile.args.lastOrNull()))?.let { readCurve2d(it, model) }
+            // A derived profile is its parent plus a 2D operator; the parent shape is
+            // what matters at field scale.
+            "IFCDERIVEDPROFILEDEF" -> model.entity(refId(profile.args.getOrNull(2)))
+                ?.let { readProfileRing(it, model, depth + 1) }
+            "IFCCOMPOSITEPROFILEDEF" -> splitArgs(profile.args.getOrNull(2)?.trim('(', ')').orEmpty())
+                .firstNotNullOfOrNull { ref ->
+                    model.entity(refId(ref))?.let { readProfileRing(it, model, depth + 1) }
+                }
+            else -> {
+                // IfcRectangleProfileDef and the parametric steel shapes (I, T, L, U,
+                // C, Z) all start with their overall X/Y size, which is close enough
+                // for a solid seen in the field.
+                val box = boxProfile(profile, model)
+                if (box != null) {
+                    return box
+                }
+                val curve = model.entity(refId(profile.args.lastOrNull()))
+                    ?.let { readCurve2d(it, model) }
+                if (curve == null) {
+                    model.unsupported[profile.type] = (model.unsupported[profile.type] ?: 0) + 1
+                }
+                curve
+            }
         }
     }
 
@@ -524,11 +697,13 @@ object IfcGeoParser {
         return openLocalRing(pts)
     }
 
-    private fun rectangleProfile(profile: Entity, model: Model): List<LocalPoint2>? {
+    private fun boxProfile(profile: Entity, model: Model): List<LocalPoint2>? {
+        if (!profile.type.endsWith("PROFILEDEF")) return null
         val floats = profile.args.mapNotNull { it.toDoubleOrNull() }
         if (floats.size < 2) return null
-        val xDim = floats[floats.size - 2]
-        val yDim = floats[floats.size - 1]
+        val xDim = floats[0]
+        val yDim = floats[1]
+        if (xDim <= 0.0 || yDim <= 0.0) return null
         val hx = xDim / 2.0
         val hy = yDim / 2.0
         val (origin, refDir) = axis2Placement2d(model, refId(profile.args.firstOrNull { it.startsWith("#") }))
@@ -542,7 +717,9 @@ object IfcGeoParser {
     }
 
     private fun circleProfile(profile: Entity, model: Model): List<LocalPoint2>? {
-        val radius = profile.args.mapNotNull { it.toDoubleOrNull() }.lastOrNull() ?: return null
+        // Radius first; a hollow section adds the wall thickness after it.
+        val radius = profile.args.mapNotNull { it.toDoubleOrNull() }.firstOrNull() ?: return null
+        if (radius <= 0.0) return null
         val (origin, _) = axis2Placement2d(model, refId(profile.args.firstOrNull { it.startsWith("#") }))
         val steps = 24
         return (0 until steps).map { i ->
@@ -651,14 +828,14 @@ object IfcGeoParser {
         return LocalMesh(name, vertices, indices)
     }
 
-    private fun facetedBrepToMesh(
+    private fun shellToMesh(
         model: Model,
         shell: Entity?,
         transform: Mat4,
         name: String,
     ): LocalMesh? {
         shell ?: return null
-        if (shell.type != "IFCCLOSEDSHELL" && shell.type != "IFCOPENSHELL") return null
+        if (!shell.type.endsWith("SHELL")) return null
         val vertices = mutableListOf<Vec3f>()
         val indices = mutableListOf<Int>()
         splitArgs(shell.args.first().trim('(', ')')).forEach { faceTok ->
@@ -667,10 +844,7 @@ object IfcGeoParser {
             splitArgs(bounds.trim('(', ')')).forEach { boundTok ->
                 val bound = model.entity(refId(boundTok)) ?: return@forEach
                 val loop = model.entity(refId(bound.args.getOrNull(0))) ?: return@forEach
-                if (loop.type != "IFCPOLYLOOP") return@forEach
-                val pts = splitArgs(loop.args.first().trim('(', ')'))
-                    .mapNotNull { cartesian3(model, refId(it)) }
-                    .map { transform.transform(it) }
+                val pts = loopPoints(model, loop).map { transform.transform(it) }
                 if (pts.size < 3) return@forEach
                 val base = vertices.size
                 pts.forEach { vertices += toScene(it) }
@@ -684,6 +858,29 @@ object IfcGeoParser {
         return LocalMesh(name, vertices, indices)
     }
 
+    /**
+     * Vertices of a face loop. IFC4 advanced BReps use edge loops whose curves can be
+     * splines; taking the edge endpoints approximates them with chords, which is what
+     * a field solid needs.
+     */
+    private fun loopPoints(model: Model, loop: Entity): List<LocalPoint3> = when (loop.type) {
+        "IFCPOLYLOOP" -> splitArgs(loop.args.first().trim('(', ')'))
+            .mapNotNull { cartesian3(model, refId(it)) }
+        "IFCEDGELOOP" -> splitArgs(loop.args.first().trim('(', ')')).mapNotNull { edgeTok ->
+            val oriented = model.entity(refId(edgeTok)) ?: return@mapNotNull null
+            val edge = model.entity(refId(oriented.args.getOrNull(2))) ?: return@mapNotNull null
+            val forward = oriented.args.getOrNull(3)?.trim() != ".F."
+            val vertexRef = if (forward) edge.args.getOrNull(0) else edge.args.getOrNull(1)
+            val vertex = model.entity(refId(vertexRef)) ?: return@mapNotNull null
+            cartesian3(model, refId(vertex.args.getOrNull(0)))
+        }
+        "IFCVERTEXLOOP" -> emptyList()
+        else -> {
+            model.unsupported[loop.type] = (model.unsupported[loop.type] ?: 0) + 1
+            emptyList()
+        }
+    }
+
     private fun fanIndices(csv: String, out: MutableList<Int>) {
         val idx = csv.split(',').mapNotNull { it.trim().toIntOrNull() }.map { it - 1 }
         if (idx.size < 3) return
@@ -691,6 +888,43 @@ object IfcGeoParser {
     }
 
     /** Pack many small solids into few renderable chunks, bounded per chunk. */
+    /**
+     * A broken placement chain yields NaN or survey-scale coordinates. One such solid
+     * blows up the bounding box the viewer frames the model with, so the screen ends
+     * up empty; drop them instead.
+     */
+    private fun sanitizeMeshes(meshes: List<LocalMesh>): List<LocalMesh> {
+        val finite = meshes.filter { mesh ->
+            mesh.vertices.isNotEmpty() && mesh.vertices.all { v ->
+                v.x.isFinite() && v.y.isFinite() && v.z.isFinite()
+            }
+        }
+        if (finite.size < 2) return finite
+
+        val centers = finite.map { mesh ->
+            var sx = 0.0
+            var sy = 0.0
+            var sz = 0.0
+            mesh.vertices.forEach { v ->
+                sx += v.x
+                sy += v.y
+                sz += v.z
+            }
+            val n = mesh.vertices.size
+            Triple(sx / n, sy / n, sz / n)
+        }
+        val midX = centers.map { it.first }.sorted()[centers.size / 2]
+        val midY = centers.map { it.second }.sorted()[centers.size / 2]
+        val midZ = centers.map { it.third }.sorted()[centers.size / 2]
+        return finite.filterIndexed { index, _ ->
+            val (cx, cy, cz) = centers[index]
+            val dx = cx - midX
+            val dy = cy - midY
+            val dz = cz - midZ
+            sqrt(dx * dx + dy * dy + dz * dz) <= MAX_MESH_SPREAD_M
+        }
+    }
+
     private fun mergeMeshes(meshes: List<LocalMesh>): List<LocalMesh> {
         if (meshes.size <= 24) return meshes
         val chunks = mutableListOf<LocalMesh>()
