@@ -366,7 +366,8 @@ fun ArScreen(
                         onBringHere = {
                             bringHereTick += 1
                             gpsLocked = false
-                            fixHint = "Demo: sólido a ~25–30 m delante (no es la posición GPS real)"
+                            fixHint = "Sólido delante, a la distancia para verlo completo " +
+                                "(no es su posición GPS)"
                         },
                         onToggleGpsLock = {
                             if (placement == Placement.Local) {

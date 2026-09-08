@@ -704,8 +704,13 @@ object IfcGeoParser {
         if (!profile.type.endsWith("PROFILEDEF")) return null
         val floats = profile.args.mapNotNull { it.toDoubleOrNull() }
         if (floats.size < 2) return null
-        val xDim = floats[0]
-        val yDim = floats[1]
+        val (xDim, yDim) = when (profile.type) {
+            // Ellipses are given as semi-axes, trapeziums as both widths then depth.
+            "IFCELLIPSEPROFILEDEF" -> floats[0] * 2.0 to floats[1] * 2.0
+            "IFCTRAPEZIUMPROFILEDEF" ->
+                maxOf(floats[0], floats[1]) to (floats.getOrNull(2) ?: return null)
+            else -> floats[0] to floats[1]
+        }
         if (xDim <= 0.0 || yDim <= 0.0) return null
         val hx = xDim / 2.0
         val hy = yDim / 2.0
@@ -890,7 +895,6 @@ object IfcGeoParser {
         for (i in 1 until idx.size - 1) out += listOf(idx[0], idx[i], idx[i + 1])
     }
 
-    /** Pack many small solids into few renderable chunks, bounded per chunk. */
     /**
      * A broken placement chain yields NaN or survey-scale coordinates. One such solid
      * blows up the bounding box the viewer frames the model with, so the screen ends
@@ -928,6 +932,7 @@ object IfcGeoParser {
         }
     }
 
+    /** Pack many small solids into few renderable chunks, bounded per chunk. */
     private fun mergeMeshes(meshes: List<LocalMesh>): List<LocalMesh> {
         if (meshes.size <= 24) return meshes
         val chunks = mutableListOf<LocalMesh>()
