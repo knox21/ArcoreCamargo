@@ -38,10 +38,10 @@ import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.data.LocalMesh
 import com.arcoregeo.campoar.data.MeshEdgeCache
 import com.arcoregeo.campoar.data.Vec3f
+import com.arcoregeo.campoar.data.edgeRibbons
 import com.arcoregeo.campoar.data.shadingOf
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
-import com.google.android.filament.RenderableManager
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
@@ -295,6 +295,7 @@ private fun applyDisplayMode(
                     materialLoader = materialLoader,
                     body = body,
                     edges = outlines.getOrNull(body.meshIndex).orEmpty(),
+                    halfWidth = (model.spanMeters * 0.003f).coerceIn(0.015f, 0.08f),
                 )
             }.getOrNull()
         }
@@ -431,9 +432,10 @@ private fun outlineNode(
     materialLoader: MaterialLoader,
     body: ViewerBody,
     edges: List<Int>,
+    halfWidth: Float,
 ): GeometryNode? {
-    if (edges.size < 2) return null
-    val vertices = body.mesh.vertices.map { v ->
+    val ribbon = edgeRibbons(body.mesh, edges, halfWidth) ?: return null
+    val vertices = ribbon.vertices.map { v ->
         Geometry.Vertex(
             position = Float3(v.x - body.origin.x, v.y - body.origin.y, v.z - body.origin.z),
             normal = Float3(0f, 1f, 0f),
@@ -441,9 +443,9 @@ private fun outlineNode(
             color = OUTLINE_COLOR,
         )
     }
-    val geometry = Geometry.Builder(RenderableManager.PrimitiveType.LINES)
+    val geometry = Geometry.Builder()
         .vertices(vertices)
-        .indices(edges)
+        .indices(ribbon.indices)
         .build(engine)
     val material = materialLoader.createColorInstance(
         OUTLINE_COLOR,

@@ -713,16 +713,18 @@ private fun ArWorldScene(
                 (document.meshOrigin != null || document.polygons.isEmpty())
             if (meshPlaceable) {
                 // Show the real IFC model, same geometry as the 3D viewer.
-                val meshNodes = buildMeshNodes(
-                    engine = engine,
-                    materials = solidMaterials,
-                    meshes = document.localMeshes,
-                    calibration = calib,
-                    meshOrigin = document.meshOrigin,
-                    rotationDeg = document.meshRotationDeg,
-                    heightOffsetMeters = heightOffsetM,
-                    outlines = outlines,
-                )
+                val meshNodes = runCatching {
+                    buildMeshNodes(
+                        engine = engine,
+                        materials = solidMaterials,
+                        meshes = document.localMeshes,
+                        calibration = calib,
+                        meshOrigin = document.meshOrigin,
+                        rotationDeg = document.meshRotationDeg,
+                        heightOffsetMeters = heightOffsetM,
+                        outlines = outlines,
+                    )
+                }.getOrDefault(emptyList())
                 parts += meshNodes.size
                 meshNodes.forEach { root.addChildNode(it) }
             } else {

@@ -171,4 +171,20 @@ class MeshDisplayTest {
         assertEquals(2, first.size)
         assertEquals(12, first[0].size / 2)
     }
+
+    @Test
+    fun `ribbons turn each box edge into triangles Filament can draw`() {
+        val mesh = prism()
+        val edges = featureEdges(mesh)
+
+        val ribbon = edgeRibbons(mesh, edges, halfWidth = 0.05f)
+
+        requireNotNull(ribbon)
+        assertEquals(0, ribbon.indices.size % 3)
+        // Two quads per edge, two triangles per quad.
+        assertEquals(12 * 2 * 2, ribbon.indices.size / 3)
+        ribbon.vertices.forEach { v ->
+            assertTrue(v.x.isFinite() && v.y.isFinite() && v.z.isFinite())
+        }
+    }
 }

@@ -4,11 +4,11 @@ import android.graphics.Color
 import com.arcoregeo.campoar.data.LatLngAlt
 import com.arcoregeo.campoar.data.LocalMesh
 import com.arcoregeo.campoar.data.MeshShading
+import com.arcoregeo.campoar.data.edgeRibbons
 import com.arcoregeo.campoar.data.shadingOf
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
-import com.google.android.filament.RenderableManager
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
@@ -25,7 +25,7 @@ import kotlin.math.sqrt
 private val WALL_COLOR = Float4(0.98f, 0.62f, 0.22f, 1f)
 private val TOP_COLOR = Float4(1f, 0.90f, 0.40f, 1f)
 private val BOTTOM_COLOR = Float4(0.45f, 0.78f, 1f, 1f)
-private val OUTLINE_COLOR = Float4(0.05f, 0.07f, 0.11f, 1f)
+private val OUTLINE_COLOR = Float4(0.12f, 0.12f, 0.14f, 1f)
 
 /**
  * Material instances shared by every solid of a document. They live as long as the
@@ -40,22 +40,7 @@ class ArSolidMaterials(loader: MaterialLoader) {
     val post: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#F8FAFC"))
     val marker: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
     val you: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#34D399"))
-
-    // Used only when the outline is drawn. The lines run exactly along the surface,
-    // so the faces are nudged back a hair to keep the depth test from eating them.
-    val meshWall: MaterialInstance = loader.createArVisibleColor(WALL_COLOR).offsetForOutline()
-    val meshTop: MaterialInstance = loader.createArVisibleColor(TOP_COLOR).offsetForOutline()
-    val meshBottom: MaterialInstance = loader.createArVisibleColor(BOTTOM_COLOR).offsetForOutline()
-    val outline: MaterialInstance = loader.createColorInstance(
-        OUTLINE_COLOR,
-        metallic = 0f,
-        roughness = 1f,
-        reflectance = 0f,
-    )
-}
-
-private fun MaterialInstance.offsetForOutline(): MaterialInstance = apply {
-    setPolygonOffset(2f, 2f)
+    val outline: MaterialInstance = loader.createArVisibleColor(OUTLINE_COLOR)
 }
 
 /**
@@ -157,7 +142,9 @@ fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
  * [rotationDeg] turns its axes onto true north.
  *
  * Passing [outlines] — one list of index pairs per mesh — draws the model with its
- * faces told apart by colour and its edges over the top.
+ * faces told apart by colour and a triangle ribbon over each edge. The camera opens
+ * without that overlay: tracing edges and asking Filament for LINES is what took
+ * the process down as soon as the session started.
  */
 fun buildMeshNodes(
     engine: Engine,
@@ -181,24 +168,35 @@ fun buildMeshNodes(
     val palette = listOf(materials.wall, materials.top, materials.bottom)
     val nodes = mutableListOf<Node>()
     meshes.forEachIndexed { index, mesh ->
-        if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return@forEachIndexed
-        val shading = shadingOf(mesh)
-        val body = if (outlines != null) {
-            facedMeshNode(engine, materials, mesh, shading)
+        if (outlines == null) {
+            val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size])
+                ?: return@forEachIndexed
+            nodes += GeometryNode(engine, geometry, palette[index % palette.size]) {
+                culling(false)
+            }.stand(place, turn)
+            return@forEachIndexed
+        }
+        val shading = runCatching { shadingOf(mesh) }.getOrNull()
+        if (shading != null) {
+            listOf(
+                shading.walls to materials.wall,
+                shading.tops to materials.top,
+                shading.bottoms to materials.bottom,
+            ).forEach { (indices, material) ->
+                meshGeometry(engine, mesh, shading, indices, material)?.let {
+                    nodes += it.stand(place, turn)
+                }
+            }
         } else {
-            plainMeshNode(
-                engine = engine,
-                mesh = mesh,
-                shading = shading,
-                color = MESH_COLORS[index % MESH_COLORS.size],
-                material = palette[index % palette.size],
-            )
+            val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size])
+            if (geometry != null) {
+                nodes += GeometryNode(engine, geometry, palette[index % palette.size]) {
+                    culling(false)
+                }.stand(place, turn)
+            }
         }
-        body?.let { nodes += it.stand(place, turn) }
-        if (outlines != null) {
-            outlineMeshNode(engine, materials, mesh, shading, outlines.getOrNull(index).orEmpty())
-                ?.let { nodes += it.stand(place, turn) }
-        }
+        ribbonNode(engine, materials.outline, mesh, outlines.getOrNull(index).orEmpty())
+            ?.let { nodes += it.stand(place, turn) }
     }
     return nodes
 }
@@ -214,76 +212,103 @@ private fun Node.stand(place: Position, turn: Position): Node = apply {
     rotation = turn
 }
 
-private fun meshVertices(mesh: LocalMesh, normals: FloatArray, color: Float4) =
-    mesh.vertices.mapIndexed { i, v ->
-        Geometry.Vertex(
-            Float3(v.x, v.y, v.z),
-            Float3(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]),
-            Float2(0f, 0f),
-            color,
-        )
-    }
+private fun buildMeshGeometry(engine: Engine, mesh: LocalMesh, color: Float4): Geometry? {
+    if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return null
 
-private fun plainMeshNode(
+    // Filament indexes natively; an out-of-range index takes the process down.
+    val indices = ArrayList<Int>(mesh.indices.size)
+    val normals = Array(mesh.vertices.size) { Float3(0f, 0f, 0f) }
+    var t = 0
+    while (t + 2 < mesh.indices.size) {
+        val ia = mesh.indices[t]
+        val ib = mesh.indices[t + 1]
+        val ic = mesh.indices[t + 2]
+        if (ia in mesh.vertices.indices && ib in mesh.vertices.indices && ic in mesh.vertices.indices) {
+            indices += ia
+            indices += ib
+            indices += ic
+            val a = mesh.vertices[ia]
+            val b = mesh.vertices[ib]
+            val c = mesh.vertices[ic]
+            val n = Float3(
+                (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
+                (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x),
+            )
+            normals[ia] = Float3(normals[ia].x + n.x, normals[ia].y + n.y, normals[ia].z + n.z)
+            normals[ib] = Float3(normals[ib].x + n.x, normals[ib].y + n.y, normals[ib].z + n.z)
+            normals[ic] = Float3(normals[ic].x + n.x, normals[ic].y + n.y, normals[ic].z + n.z)
+        }
+        t += 3
+    }
+    if (indices.isEmpty()) return null
+
+    val vertices = mesh.vertices.mapIndexed { i, v ->
+        val n = normals[i]
+        val len = sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+        val normal = if (len < 1e-6f || !len.isFinite()) {
+            Float3(0f, 1f, 0f)
+        } else {
+            Float3(n.x / len, n.y / len, n.z / len)
+        }
+        Geometry.Vertex(Float3(v.x, v.y, v.z), normal, Float2(0f, 0f), color)
+    }
+    return Geometry.Builder().vertices(vertices).indices(indices).build(engine)
+}
+
+private fun meshGeometry(
     engine: Engine,
     mesh: LocalMesh,
     shading: MeshShading,
-    color: Float4,
+    indices: List<Int>,
     material: MaterialInstance,
 ): GeometryNode? {
-    // Filament indexes natively; an out-of-range index takes the process down, so
-    // only the triangles the shading pass checked are drawn.
-    val indices = shading.walls + shading.tops + shading.bottoms
     if (indices.size < 3) return null
-    val geometry = Geometry.Builder()
-        .vertices(meshVertices(mesh, shading.normals, color))
-        .indices(indices)
-        .build(engine)
+    val vertices = mesh.vertices.mapIndexed { i, v ->
+        Geometry.Vertex(
+            Float3(v.x, v.y, v.z),
+            Float3(shading.normals[i * 3], shading.normals[i * 3 + 1], shading.normals[i * 3 + 2]),
+            Float2(0f, 0f),
+            WALL_COLOR,
+        )
+    }
+    val geometry = Geometry.Builder().vertices(vertices).indices(indices).build(engine)
     return GeometryNode(engine, geometry, material) {
         culling(false)
     }
 }
 
-private fun facedMeshNode(
+private fun ribbonNode(
     engine: Engine,
-    materials: ArSolidMaterials,
+    material: MaterialInstance,
     mesh: LocalMesh,
-    shading: MeshShading,
+    edges: List<Int>,
 ): GeometryNode? {
-    val groups = listOf(
-        shading.walls to materials.meshWall,
-        shading.tops to materials.meshTop,
-        shading.bottoms to materials.meshBottom,
-    ).filter { (indices, _) -> indices.isNotEmpty() }
-    if (groups.isEmpty()) return null
-    val geometry = Geometry.Builder()
-        .vertices(meshVertices(mesh, shading.normals, WALL_COLOR))
-        .primitivesIndices(groups.map { (indices, _) -> indices })
-        .build(engine)
-    return GeometryNode(
-        engine = engine,
-        geometry = geometry,
-        materialInstances = groups.map { (_, material) -> material },
-    ) {
+    val ribbon = edgeRibbons(mesh, edges, halfWidth = ribbonWidthOf(mesh)) ?: return null
+    val geometry = buildMeshGeometry(engine, ribbon, OUTLINE_COLOR) ?: return null
+    return GeometryNode(engine, geometry, material) {
         culling(false)
     }
 }
 
-private fun outlineMeshNode(
-    engine: Engine,
-    materials: ArSolidMaterials,
-    mesh: LocalMesh,
-    shading: MeshShading,
-    edges: List<Int>,
-): GeometryNode? {
-    if (edges.size < 2) return null
-    val geometry = Geometry.Builder(RenderableManager.PrimitiveType.LINES)
-        .vertices(meshVertices(mesh, shading.normals, OUTLINE_COLOR))
-        .indices(edges)
-        .build(engine)
-    return GeometryNode(engine, geometry, materials.outline) {
-        culling(false)
+private fun ribbonWidthOf(mesh: LocalMesh): Float {
+    var minX = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var minY = Float.MAX_VALUE
+    var maxY = -Float.MAX_VALUE
+    var minZ = Float.MAX_VALUE
+    var maxZ = -Float.MAX_VALUE
+    mesh.vertices.forEach { v ->
+        if (!v.x.isFinite()) return@forEach
+        if (v.x < minX) minX = v.x
+        if (v.x > maxX) maxX = v.x
+        if (v.y < minY) minY = v.y
+        if (v.y > maxY) maxY = v.y
+        if (v.z < minZ) minZ = v.z
+        if (v.z > maxZ) maxZ = v.z
     }
+    val span = maxOf(maxX - minX, maxY - minY, maxZ - minZ)
+    return if (span.isFinite() && span > 0f) (span * 0.004f).coerceIn(0.02f, 0.12f) else 0.04f
 }
 
 private fun buildWallGeometry(

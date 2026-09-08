@@ -160,6 +160,79 @@ class MeshEdgeCache(private val meshes: List<LocalMesh>) {
     fun edges(): List<List<Int>> = cached ?: meshes.map(::featureEdges).also { cached = it }
 }
 
+/**
+ * Turns each outline segment into two thin quads, a cross along the edge, so it can
+ * be drawn with the same triangle material as the solid. Filament's lit materials
+ * on Android do not carry a LINES shader, and asking for one takes the process down.
+ */
+fun edgeRibbons(mesh: LocalMesh, edges: List<Int>, halfWidth: Float): LocalMesh? {
+    if (edges.size < 2 || mesh.vertices.isEmpty()) return null
+    val width = if (halfWidth.isFinite() && halfWidth > 0f) halfWidth else 0.04f
+    val vertices = ArrayList<Vec3f>(edges.size * 4)
+    val indices = ArrayList<Int>(edges.size * 12)
+    var i = 0
+    while (i + 1 < edges.size) {
+        val ia = edges[i]
+        val ib = edges[i + 1]
+        i += 2
+        if (ia !in mesh.vertices.indices || ib !in mesh.vertices.indices) continue
+        val a = mesh.vertices[ia]
+        val b = mesh.vertices[ib]
+        if (!a.x.isFinite() || !b.x.isFinite()) continue
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val dz = b.z - a.z
+        val len = sqrt(dx * dx + dy * dy + dz * dz)
+        if (len < 1e-4f) continue
+        val ux = dx / len
+        val uy = dy / len
+        val uz = dz / len
+        var vx = uz
+        var vy = 0f
+        var vz = -ux
+        var vLen = sqrt(vx * vx + vy * vy + vz * vz)
+        if (vLen < 0.1f) {
+            vx = 0f
+            vy = uz
+            vz = -uy
+            vLen = sqrt(vx * vx + vy * vy + vz * vz)
+        }
+        if (vLen < 1e-6f) continue
+        vx = vx / vLen * width
+        vy = vy / vLen * width
+        vz = vz / vLen * width
+        val wx = (uy * vz - uz * vy)
+        val wy = (uz * vx - ux * vz)
+        val wz = (ux * vy - uy * vx)
+        appendRibbonQuad(vertices, indices, a, b, vx, vy, vz)
+        appendRibbonQuad(vertices, indices, a, b, wx, wy, wz)
+    }
+    if (indices.size < 3) return null
+    return LocalMesh("aristas", vertices, indices)
+}
+
+private fun appendRibbonQuad(
+    vertices: MutableList<Vec3f>,
+    indices: MutableList<Int>,
+    a: Vec3f,
+    b: Vec3f,
+    px: Float,
+    py: Float,
+    pz: Float,
+) {
+    val start = vertices.size
+    vertices += Vec3f(a.x - px, a.y - py, a.z - pz)
+    vertices += Vec3f(b.x - px, b.y - py, b.z - pz)
+    vertices += Vec3f(b.x + px, b.y + py, b.z + pz)
+    vertices += Vec3f(a.x + px, a.y + py, a.z + pz)
+    indices += start
+    indices += start + 1
+    indices += start + 2
+    indices += start
+    indices += start + 2
+    indices += start + 3
+}
+
 /** One copy of each in-range triangle, with its unit normal and the volume they enclose. */
 private class Faces(
     val indices: IntArray,
