@@ -166,6 +166,102 @@ class IfcGeoParserTest {
         assertTrue(!doc.isGeoreferenced)
     }
 
+    /** Minimal Revit IFC2X3 WallStandardCase + RectangleProfile + site placement. */
+    private val ifcRevitWall = """
+        ISO-10303-21;
+        HEADER;
+        FILE_SCHEMA(('IFC2X3'));
+        ENDSEC;
+        DATA;
+        #6=IFCCARTESIANPOINT((0.,0.,0.));
+        #9=IFCCARTESIANPOINT((0.,0.));
+        #11=IFCDIRECTION((1.,0.,0.));
+        #17=IFCDIRECTION((0.,-1.,0.));
+        #19=IFCDIRECTION((0.,0.,1.));
+        #25=IFCDIRECTION((-1.,0.));
+        #31=IFCAXIS2PLACEMENT3D(#6,${'$'},${'$'});
+        #32=IFCLOCALPLACEMENT(#163,#31);
+        #135=IFCCARTESIANPOINT((0.,0.,-2.));
+        #137=IFCAXIS2PLACEMENT3D(#135,${'$'},${'$'});
+        #138=IFCLOCALPLACEMENT(#32,#137);
+        #158=IFCCARTESIANPOINT((273258.394040389,8686440.36643775,181.));
+        #160=IFCDIRECTION((0.542926549111797,0.83978018687604,0.));
+        #162=IFCAXIS2PLACEMENT3D(#158,#19,#160);
+        #163=IFCLOCALPLACEMENT(${'$'},#162);
+        #164=IFCSITE('site',${'$'},'Default',${'$'},${'$'},#163,${'$'},${'$'},.ELEMENT.,(-11,-52,-29,-240089),(-77,-4,-53,-665776),180.999999999997,${'$'},${'$'});
+        #195=IFCCARTESIANPOINT((96.3771213923411,29.150972090348,1.));
+        #197=IFCAXIS2PLACEMENT3D(#195,#19,#17);
+        #198=IFCLOCALPLACEMENT(#138,#197);
+        #200=IFCCARTESIANPOINT((1.22231154075829,0.));
+        #202=IFCPOLYLINE((#9,#200));
+        #204=IFCSHAPEREPRESENTATION(${'$'},'Axis','Curve2D',(#202));
+        #207=IFCCARTESIANPOINT((0.611155770379146,0.));
+        #209=IFCAXIS2PLACEMENT2D(#207,#25);
+        #210=IFCRECTANGLEPROFILEDEF(.AREA.,${'$'},#209,1.22231154075829,0.250000000000012);
+        #211=IFCAXIS2PLACEMENT3D(#6,${'$'},${'$'});
+        #212=IFCEXTRUDEDAREASOLID(#210,#211,#19,1.49999999999863);
+        #222=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#212));
+        #225=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#204,#222));
+        #229=IFCWALLSTANDARDCASE('wall1',${'$'},'Basic Wall:MUROS',${'$'},'Basic Wall',#198,#225,'1955589');
+        ENDSEC;
+        END-ISO-10303-21;
+    """.trimIndent()
+
+    @Test
+    fun `imports Revit IFC2X3 wall with placement and cancels huge site coords`() {
+        val doc = IfcGeoParser.parse("cmi_santa_rosa.ifc", ifcRevitWall)
+        assertTrue(doc.localMeshes.isNotEmpty())
+        assertTrue(doc.solidHeightMeters!! > 1f)
+        val verts = doc.localMeshes.flatMap { it.vertices }
+        val maxAbs = verts.maxOf { maxOf(abs(it.x), abs(it.y), abs(it.z)) }
+        // Without site cancel this would be ~millions of meters.
+        assertTrue("coords too large: $maxAbs", maxAbs < 5_000f)
+        // Wall sits near (96, 29) in building local → scene Y-up so X/Z roughly that scale.
+        assertTrue("expected wall near project base, got $maxAbs", maxAbs > 10f)
+        assertTrue(doc.isGeoreferenced)
+        assertTrue(doc.polygons.isNotEmpty())
+    }
+
+    @Test
+    fun `unwraps boolean clipping to extruded solid`() {
+        val ifc = """
+            ISO-10303-21;
+            DATA;
+            #1=IFCCARTESIANPOINTLIST2D(((0.,0.),(4.,0.),(4.,2.),(0.,2.)));
+            #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),.F.);
+            #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,'P',#2);
+            #4=IFCEXTRUDEDAREASOLID(#3,${'$'},${'$'},3.0);
+            #5=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#4,#4);
+            #6=IFCSHAPEREPRESENTATION(${'$'},'Body','SweptSolid',(#5));
+            #7=IFCPRODUCTDEFINITIONSHAPE(${'$'},${'$'},(#6));
+            #8=IFCWALL('w',${'$'},'Muro clipped',${'$'},${'$'},${'$'},#7,${'$'});
+            ENDSEC;
+            END-ISO-10303-21;
+        """.trimIndent()
+        val doc = IfcGeoParser.parse("clipped.ifc", ifc)
+        assertTrue(doc.localMeshes.isNotEmpty())
+        assertEquals(3f, doc.solidHeightMeters)
+    }
+
+    private fun openRing(ring: List<LatLngAlt>): List<LatLngAlt> {
+        if (ring.size < 2) return ring
+        val a = ring.first()
+        val b = ring.last()
+        return if (abs(a.latitude - b.latitude) < 1e-12 && abs(a.longitude - b.longitude) < 1e-12) {
+            ring.dropLast(1)
+        } else {
+            ring
+        }
+    }
+
+    private fun centroidOf(ring: List<LatLngAlt>): LatLngAlt? {
+        if (ring.isEmpty()) return null
+        return LatLngAlt(
+            ring.map { it.latitude }.average(),
+            ring.map { it.longitude }.average(),
+        )
+    }
+
     private object GeoDistance {
         fun meters(a: LatLngAlt, b: LatLngAlt): Double {
             val dLat = Math.toRadians(b.latitude - a.latitude) * 6_378_137.0
