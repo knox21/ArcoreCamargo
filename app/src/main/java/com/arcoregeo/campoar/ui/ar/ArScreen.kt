@@ -652,7 +652,7 @@ private fun ArWorldScene(
         onGestureListener = gestureListener,
         sessionConfiguration = { session, config ->
             config.planeFindingMode = Config.PlaneFindingMode.HORIZONTAL
-            config.lightEstimationMode = Config.LightEstimationMode.DISABLED
+            config.lightEstimationMode = Config.LightEstimationMode.AMBIENT_INTENSITY
             if (session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)) {
                 config.geospatialMode = Config.GeospatialMode.ENABLED
             }

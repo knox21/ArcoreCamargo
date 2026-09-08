@@ -62,10 +62,12 @@ fun CampoArRoot(viewModel: CampoViewModel) {
                     MapScreen(
                         document = document,
                         downloadProgress = state.downloadProgress,
+                        myPose = state.pose,
                         onBack = { navController.popBackStack() },
                         onDownloadOffline = viewModel::downloadOfflineMap,
                         onOpenAr = { navController.navigate("ar/${document.id}") },
                         onSelectPoint = viewModel::selectPoint,
+                        onStartLocation = viewModel::startLocation,
                     )
                 }
             }

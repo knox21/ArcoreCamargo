@@ -10,7 +10,6 @@ import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
 import io.github.sceneview.geometries.Geometry
 import io.github.sceneview.loaders.MaterialLoader
-import io.github.sceneview.material.setParameter
 import io.github.sceneview.math.Position
 import io.github.sceneview.math.Size
 import io.github.sceneview.node.CubeNode
@@ -96,15 +95,16 @@ fun buildSolidNodes(
     return nodes
 }
 
-/** Lit color + soft emissive so the mesh stays readable under AR camera lighting. */
+/** Bright matte color that stays readable under ARCore ambient light estimation. */
 fun MaterialLoader.createArVisibleColor(color: Float4): MaterialInstance {
-    val mat = createColorInstance(color, metallic = 0f, roughness = 0.92f, reflectance = 0f)
-    // Filament opaque_colored exposes "emissive" — keeps albedo visible without IBL.
-    mat.setParameter(
-        "emissive",
-        Float4(color.x * 0.55f, color.y * 0.55f, color.z * 0.55f, 0f),
+    // Boost albedo slightly — opaque_colored has no emissive parameter (setting one crashes).
+    val boosted = Float4(
+        (color.x * 1.15f).coerceAtMost(1f),
+        (color.y * 1.15f).coerceAtMost(1f),
+        (color.z * 1.15f).coerceAtMost(1f),
+        1f,
     )
-    return mat
+    return createColorInstance(boosted, metallic = 0f, roughness = 1f, reflectance = 0f)
 }
 
 fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
