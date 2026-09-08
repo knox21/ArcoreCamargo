@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Ejemplo CampoAR</name>
+    <Placemark>
+      <name>Punto norte</name>
+      <description>Marca de prueba para ubicar en AR</description>
+      <Point>
+        <coordinates>-99.1332,19.4330,2240</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>Punto centro</name>
+      <description>Segundo punto del ejemplo</description>
+      <Point>
+        <coordinates>-99.1335,19.4324,2240</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>Punto sur</name>
+      <Point>
+        <coordinates>-99.1338,19.4318,2240</coordinates>
+      </Point>
+    </Placemark>
+    <Placemark>
+      <name>Tramo de ejemplo</name>
+      <LineString>
+        <coordinates>
+          -99.1332,19.4330,2240
+          -99.1335,19.4324,2240
+          -99.1338,19.4318,2240
+        </coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>

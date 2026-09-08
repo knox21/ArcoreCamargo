@@ -1,0 +1,7 @@
+centroid_lon=-71.52842834540857
+centroid_lat=-16.4205189684397
+height_m=3.0
+vertices=4
+utm_easting=229978.3869586339
+utm_northing=8182863.234587425
+epsg=32719

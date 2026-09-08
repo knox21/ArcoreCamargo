@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2" xmlns:gx="http://www.google.com/kml/ext/2.2">
+  <Document>
+    <name>Poligono Google Earth</name>
+    <Placemark>
+      <name>Predio de prueba</name>
+      <description>Polígono exportado como en Google Earth</description>
+      <Style>
+        <PolyStyle><color>7d00ff00</color></PolyStyle>
+      </Style>
+      <Polygon>
+        <tessellate>1</tessellate>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              -99.133200,19.433000,0
+              -99.132800,19.433000,0
+              -99.132800,19.432600,0
+              -99.133200,19.432600,0
+              -99.133200,19.433000,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>
