@@ -819,8 +819,8 @@ private fun ArWorldScene(
             val centroid = liveCentroid
             val devicePose = livePose
 
-            // Stands the solid in front of the camera, whole and at a readable size.
-            // The origin is only read for georeferenced geometry, which this is not.
+            // Stands the solid in front of the camera, far enough back to see it whole.
+            // Geometry with no georeference ignores the origin, so any value serves.
             fun placeInFront() {
                 val camPose = camera.pose
                 val forward = camPose.zAxis

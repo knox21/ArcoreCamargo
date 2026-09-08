@@ -25,9 +25,13 @@ Sin georreferencia igual puedes abrir el visor 3D. Para mapa/AR el IFC debe trae
 
 Al importar, el documento guarda un resumen de lo leído (sólidos, elementos, recortes y tipos sin soporte) que se muestra bajo el visor. Si un archivo no deja nada dibujable, el error nombra los tipos de geometría que encontró.
 
-En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real. A más de 100 m el modelo se acerca sobre la línea que lo une contigo, conservando rumbo y orientación, y la pantalla avisa de la distancia real; al acercarte vuelve a escala real.
+El visor encuadra el modelo según su tamaño real: la cámara, sus planos de recorte y la órbita del gesto se calculan cuando ya se conocen las medidas del edificio. Con los valores por omisión de SceneView (plano lejano a 30 m) cualquier modelo de más de unos 12 m quedaba recortado por completo y la pantalla salía vacía, y volvía a vaciarse al primer arrastre.
 
-Una malla solo se coloca por GPS si el IFC trajo origen georreferenciado. Los documentos importados con versiones anteriores no lo tienen, así que se dibuja su contorno (que sí está georreferenciado) y la cámara pide reimportar el IFC.
+En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real. A más de 100 m el modelo se acerca sobre la línea que lo une contigo, conservando rumbo y orientación, y la pantalla avisa de la distancia real; al acercarte a menos de 80 m vuelve a escala real. Esto vale igual en modo GPS y en Geospatial.
+
+El sólido se apoya en el suelo que ves. Una altitud desconocida ya no se toma como nivel del mar: antes se restaba la altitud del GPS a un modelo sin ella, y el sólido acababa tantos kilómetros bajo tierra como alto esté el sitio.
+
+Una malla solo se coloca por GPS si el IFC trajo origen georreferenciado. Los documentos importados con versiones anteriores no lo tienen, así que se dibuja su contorno (que sí está georreferenciado) y la cámara pide reimportar el IFC. Un IFC sin ninguna georreferencia se dibuja delante de ti, avisando de que no es su sitio, en vez de quedar centrado en la cámara.
 
 ### Modelos grandes
 
@@ -46,6 +50,8 @@ ARCore Geospatial de Google necesita **red** para Visual Positioning System. En 
 | Mapa | Teselas OpenFreeMap descargadas | Funciona sin red después de descargar |
 
 No uses solo Geospatial si tu trabajo es en campo sin línea.
+
+En modo GPS el ancla y el origen se renuevan siempre juntos, y solo cuando el GPS trae algo nuevo: 8 m de camino, 8° de brújula o entrar y salir de la vista lejana. Entre renovaciones es el seguimiento de ARCore el que sostiene el sólido, que es bastante más estable que el GPS. Mover el origen dejando el ancla vieja contaba tu caminata dos veces y arrastraba el modelo.
 
 ## Cómo generar el APK
 
