@@ -1,13 +1,20 @@
 package com.arcoregeo.campoar.ui.ifc
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -29,8 +36,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.data.LocalMesh
+import com.arcoregeo.campoar.data.MeshEdgeCache
 import com.arcoregeo.campoar.data.Vec3f
+import com.arcoregeo.campoar.data.shadingOf
 import com.google.android.filament.Engine
+import com.google.android.filament.MaterialInstance
+import com.google.android.filament.RenderableManager
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
@@ -47,7 +58,21 @@ import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberModelLoader
 import kotlin.math.max
-import kotlin.math.sqrt
+
+/** Palette used when the model is shown as one solid per chunk. */
+private val PLAIN_COLORS = listOf(
+    Float4(0.98f, 0.55f, 0.18f, 1f),
+    Float4(0.25f, 0.75f, 0.95f, 1f),
+    Float4(0.45f, 0.85f, 0.45f, 1f),
+    Float4(0.95f, 0.75f, 0.25f, 1f),
+    Float4(0.85f, 0.45f, 0.85f, 1f),
+)
+
+/** Palette used when faces are told apart, on the drawing conventions of a plan. */
+private val WALL_COLOR = Float4(0.86f, 0.84f, 0.79f, 1f)
+private val TOP_COLOR = Float4(0.96f, 0.70f, 0.32f, 1f)
+private val BOTTOM_COLOR = Float4(0.48f, 0.68f, 0.88f, 1f)
+private val OUTLINE_COLOR = Float4(0.05f, 0.07f, 0.11f, 1f)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,13 +83,26 @@ fun IfcViewerScreen(
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
     val materialLoader = rememberMaterialLoader(engine)
-    var build by remember { mutableStateOf<ViewerBuild?>(null) }
+    val edgeCache = remember(document.id) { MeshEdgeCache(document.localMeshes) }
+    var model by remember { mutableStateOf<ViewerModel?>(null) }
+    var sceneNodes by remember { mutableStateOf<List<Node>>(emptyList()) }
+    var edgeMode by remember { mutableStateOf(false) }
 
     LaunchedEffect(document.id) {
-        build = buildViewerNodes(engine, materialLoader, document.localMeshes)
+        edgeMode = false
+        model = buildViewerModel(engine, materialLoader, document.localMeshes)
+    }
+    LaunchedEffect(model, edgeMode) {
+        val current = model
+        if (current == null) {
+            sceneNodes = emptyList()
+            return@LaunchedEffect
+        }
+        applyDisplayMode(engine, materialLoader, edgeCache, current, edgeMode)
+        sceneNodes = current.bodies.map { it.node } + current.bodies.mapNotNull { it.edgeNode }
     }
 
-    val ready = build
+    val ready = model
     val info = buildString {
         append(
             when {
@@ -95,7 +133,7 @@ fun IfcViewerScreen(
                 .padding(padding)
                 .background(Color(0xFF0B1220)),
         ) {
-            if (ready != null && ready.nodes.isNotEmpty()) {
+            if (ready != null && sceneNodes.isNotEmpty()) {
                 // Keyed on the model so opening another document reframes the camera
                 // instead of keeping the previous building's orbit.
                 key(ready) {
@@ -103,7 +141,8 @@ fun IfcViewerScreen(
                         engine = engine,
                         modelLoader = modelLoader,
                         materialLoader = materialLoader,
-                        build = ready,
+                        model = ready,
+                        nodes = sceneNodes,
                     )
                 }
             } else {
@@ -120,14 +159,39 @@ fun IfcViewerScreen(
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
                     .background(Color(0xCC0F172A))
-                    .padding(12.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
-                Text(
-                    "Visor IFC 3D · arrastra para orbitar / pellizca para zoom",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Visor IFC 3D · arrastra para orbitar",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Button(
+                        onClick = { edgeMode = !edgeMode },
+                        enabled = ready != null,
+                        modifier = Modifier.height(32.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (edgeMode) Color(0xFFEA580C) else Color(0xFF334155),
+                        ),
+                    ) {
+                        Text(
+                            if (edgeMode) "Aristas ON" else "Ver aristas / colores",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                    }
+                }
                 Text(
                     buildString {
                         append(info)
@@ -135,7 +199,7 @@ fun IfcViewerScreen(
                         else append(" · coordenadas locales")
                     },
                     color = Color(0xFF94A3B8),
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
@@ -154,14 +218,15 @@ private fun ModelScene(
     engine: Engine,
     modelLoader: ModelLoader,
     materialLoader: MaterialLoader,
-    build: ViewerBuild,
+    model: ViewerModel,
+    nodes: List<Node>,
 ) {
-    val framing = remember(build) { framingFor(build.spanMeters) }
+    val framing = remember(model.spanMeters) { framingFor(model.spanMeters) }
     val cameraNode = rememberCameraNode(engine) {
         near = framing.near
         far = framing.far
         position = framing.cameraPosition
-        lookAt(build.lookAt)
+        lookAt(model.lookAt)
     }
     Scene(
         modifier = Modifier.fillMaxSize(),
@@ -171,27 +236,70 @@ private fun ModelScene(
         cameraNode = cameraNode,
         cameraManipulator = rememberCameraManipulator(
             orbitHomePosition = framing.cameraPosition,
-            targetPosition = build.lookAt,
+            targetPosition = model.lookAt,
         ),
-        childNodes = build.nodes,
+        childNodes = nodes,
         isOpaque = true,
     )
 }
 
-private data class ViewerBuild(
-    val nodes: List<Node>,
+/** One renderable chunk of the model, with the materials of both display modes. */
+private class ViewerBody(
+    val meshIndex: Int,
+    val mesh: LocalMesh,
+    val origin: Vec3f,
+    val node: GeometryNode,
+    val plain: List<MaterialInstance>,
+    val byFacing: List<MaterialInstance>,
+) {
+    var edgeNode: GeometryNode? = null
+}
+
+private class ViewerModel(
+    val bodies: List<ViewerBody>,
     val spanMeters: Float,
     val lookAt: Position,
     val summary: String,
 )
 
-private fun buildViewerNodes(
+/**
+ * Swaps the two ways of showing the model. Outlines are worked out and buffered the
+ * first time they are asked for and hidden afterwards, so the button stays instant
+ * and a model nobody outlines never pays for it.
+ */
+private fun applyDisplayMode(
+    engine: Engine,
+    materialLoader: MaterialLoader,
+    edgeCache: MeshEdgeCache,
+    model: ViewerModel,
+    edges: Boolean,
+) {
+    model.bodies.forEach { body ->
+        val materials = if (edges) body.byFacing else body.plain
+        materials.forEachIndexed { index, material ->
+            runCatching { body.node.setMaterialInstanceAt(index, material) }
+        }
+        if (edges && body.edgeNode == null) {
+            body.edgeNode = runCatching {
+                outlineNode(
+                    engine = engine,
+                    materialLoader = materialLoader,
+                    body = body,
+                    edges = edgeCache.edges().getOrNull(body.meshIndex).orEmpty(),
+                )
+            }.getOrNull()
+        }
+        body.edgeNode?.isVisible = edges
+    }
+}
+
+private fun buildViewerModel(
     engine: Engine,
     materialLoader: MaterialLoader,
     meshes: List<LocalMesh>,
-): ViewerBuild {
+): ViewerModel {
     if (meshes.isEmpty()) {
-        return ViewerBuild(emptyList(), 10f, Position(0f, 0f, 0f), "")
+        return ViewerModel(emptyList(), 10f, Position(0f, 0f, 0f), "")
     }
 
     var minX = Float.MAX_VALUE
@@ -215,103 +323,126 @@ private fun buildViewerNodes(
         }
     }
     if (vertexCount == 0) {
-        return ViewerBuild(emptyList(), 10f, Position(0f, 0f, 0f), "")
+        return ViewerModel(emptyList(), 10f, Position(0f, 0f, 0f), "")
     }
     val cx = (minX + maxX) / 2f
     val cy = (minY + maxY) / 2f
     val cz = (minZ + maxZ) / 2f
     val span = max(max(maxX - minX, maxY - minY), maxZ - minZ).coerceAtLeast(1f)
 
-    val colors = listOf(
-        Float4(0.98f, 0.55f, 0.18f, 1f),
-        Float4(0.25f, 0.75f, 0.95f, 1f),
-        Float4(0.45f, 0.85f, 0.45f, 1f),
-        Float4(0.95f, 0.75f, 0.25f, 1f),
-        Float4(0.85f, 0.45f, 0.85f, 1f),
-    )
-
-    val nodes = meshes.mapIndexedNotNull { index, mesh ->
+    val bodies = meshes.mapIndexedNotNull { index, mesh ->
         runCatching {
-            meshToNode(
+            meshToBody(
                 engine = engine,
                 materialLoader = materialLoader,
+                meshIndex = index,
                 mesh = mesh,
                 origin = Vec3f(cx, cy, cz),
-                color = colors[index % colors.size],
+                color = PLAIN_COLORS[index % PLAIN_COLORS.size],
             )
         }.getOrNull()
     }
 
-    return ViewerBuild(
-        nodes = nodes,
+    return ViewerModel(
+        bodies = bodies,
         spanMeters = span,
         lookAt = Position(0f, 0f, 0f),
         summary = "${meshes.size} sólido(s) · $vertexCount vértices · ${"%.1f".format(span)} m",
     )
 }
 
-private fun meshToNode(
+/**
+ * Builds the chunk as one renderable per group of faces, so switching to the second
+ * palette is a material swap rather than a rebuild of the whole model.
+ */
+private fun meshToBody(
     engine: Engine,
     materialLoader: MaterialLoader,
+    meshIndex: Int,
     mesh: LocalMesh,
     origin: Vec3f,
     color: Float4,
-): GeometryNode? {
+): ViewerBody? {
     if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return null
 
-    // Filament reads the index buffer natively: an out-of-range index is a hard crash.
-    val safeIndices = ArrayList<Int>(mesh.indices.size)
-    val normalsArr = Array(mesh.vertices.size) { Float3(0f, 1f, 0f) }
-    var t = 0
-    while (t + 2 < mesh.indices.size) {
-        val ia = mesh.indices[t]
-        val ib = mesh.indices[t + 1]
-        val ic = mesh.indices[t + 2]
-        if (ia in mesh.vertices.indices && ib in mesh.vertices.indices && ic in mesh.vertices.indices) {
-            safeIndices += ia
-            safeIndices += ib
-            safeIndices += ic
-            val a = mesh.vertices[ia]
-            val b = mesh.vertices[ib]
-            val c = mesh.vertices[ic]
-            val e1 = Float3(b.x - a.x, b.y - a.y, b.z - a.z)
-            val e2 = Float3(c.x - a.x, c.y - a.y, c.z - a.z)
-            val n = cross(e1, e2)
-            normalsArr[ia] = add(normalsArr[ia], n)
-            normalsArr[ib] = add(normalsArr[ib], n)
-            normalsArr[ic] = add(normalsArr[ic], n)
-        }
-        t += 3
-    }
-    if (safeIndices.isEmpty()) return null
-    val shaded = mesh.vertices.mapIndexed { idx, v ->
+    val shading = shadingOf(mesh)
+    // Filament reads the index buffer natively: an out-of-range index is a hard
+    // crash, so only the triangles that came back checked are drawn.
+    val groups = listOf(
+        shading.walls to WALL_COLOR,
+        shading.tops to TOP_COLOR,
+        shading.bottoms to BOTTOM_COLOR,
+    ).filter { (indices, _) -> indices.isNotEmpty() }
+    if (groups.isEmpty()) return null
+
+    val vertices = mesh.vertices.mapIndexed { index, v ->
         Geometry.Vertex(
             position = Float3(v.x - origin.x, v.y - origin.y, v.z - origin.z),
-            normal = normalize(normalsArr[idx]),
+            normal = Float3(
+                shading.normals[index * 3],
+                shading.normals[index * 3 + 1],
+                shading.normals[index * 3 + 2],
+            ),
             uvCoordinate = Float2(0f, 0f),
             color = color,
         )
     }
     val geometry = Geometry.Builder()
-        .vertices(shaded)
-        .indices(safeIndices)
+        .vertices(vertices)
+        .primitivesIndices(groups.map { (indices, _) -> indices })
         .build(engine)
-    val material = materialLoader.createColorInstance(color, metallic = 0.05f, roughness = 0.45f, reflectance = 0.3f)
+
+    val single = materialLoader.createColorInstance(
+        color,
+        metallic = 0.05f,
+        roughness = 0.45f,
+        reflectance = 0.3f,
+    )
+    val plain = groups.map { single }
+    val byFacing = groups.map { (_, tone) ->
+        materialLoader.createColorInstance(
+            tone,
+            metallic = 0f,
+            roughness = 0.7f,
+            reflectance = 0.1f,
+        ).apply {
+            // The outline runs exactly along the surface, so the faces are nudged
+            // back a hair to keep the lines from being eaten by the depth test.
+            setPolygonOffset(2f, 2f)
+        }
+    }
+    val node = GeometryNode(engine = engine, geometry = geometry, materialInstances = plain) {
+        culling(false)
+    }
+    return ViewerBody(meshIndex, mesh, origin, node, plain, byFacing)
+}
+
+private fun outlineNode(
+    engine: Engine,
+    materialLoader: MaterialLoader,
+    body: ViewerBody,
+    edges: List<Int>,
+): GeometryNode? {
+    if (edges.size < 2) return null
+    val vertices = body.mesh.vertices.map { v ->
+        Geometry.Vertex(
+            position = Float3(v.x - body.origin.x, v.y - body.origin.y, v.z - body.origin.z),
+            normal = Float3(0f, 1f, 0f),
+            uvCoordinate = Float2(0f, 0f),
+            color = OUTLINE_COLOR,
+        )
+    }
+    val geometry = Geometry.Builder(RenderableManager.PrimitiveType.LINES)
+        .vertices(vertices)
+        .indices(edges)
+        .build(engine)
+    val material = materialLoader.createColorInstance(
+        OUTLINE_COLOR,
+        metallic = 0f,
+        roughness = 1f,
+        reflectance = 0f,
+    )
     return GeometryNode(engine, geometry, material) {
         culling(false)
     }
-}
-
-private fun cross(a: Float3, b: Float3): Float3 =
-    Float3(
-        a.y * b.z - a.z * b.y,
-        a.z * b.x - a.x * b.z,
-        a.x * b.y - a.y * b.x,
-    )
-
-private fun add(a: Float3, b: Float3): Float3 = Float3(a.x + b.x, a.y + b.y, a.z + b.z)
-
-private fun normalize(v: Float3): Float3 {
-    val len = sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
-    return if (len < 1e-6f) Float3(0f, 1f, 0f) else Float3(v.x / len, v.y / len, v.z / len)
 }

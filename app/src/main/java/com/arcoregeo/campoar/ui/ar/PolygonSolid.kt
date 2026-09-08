@@ -3,9 +3,12 @@ package com.arcoregeo.campoar.ui.ar
 import android.graphics.Color
 import com.arcoregeo.campoar.data.LatLngAlt
 import com.arcoregeo.campoar.data.LocalMesh
+import com.arcoregeo.campoar.data.MeshShading
+import com.arcoregeo.campoar.data.shadingOf
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
+import com.google.android.filament.RenderableManager
 import dev.romainguy.kotlin.math.Float2
 import dev.romainguy.kotlin.math.Float3
 import dev.romainguy.kotlin.math.Float4
@@ -22,6 +25,7 @@ import kotlin.math.sqrt
 private val WALL_COLOR = Float4(0.98f, 0.62f, 0.22f, 1f)
 private val TOP_COLOR = Float4(1f, 0.90f, 0.40f, 1f)
 private val BOTTOM_COLOR = Float4(0.45f, 0.78f, 1f, 1f)
+private val OUTLINE_COLOR = Float4(0.05f, 0.07f, 0.11f, 1f)
 
 /**
  * Material instances shared by every solid of a document. They live as long as the
@@ -36,6 +40,22 @@ class ArSolidMaterials(loader: MaterialLoader) {
     val post: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#F8FAFC"))
     val marker: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
     val you: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#34D399"))
+
+    // Used only when the outline is drawn. The lines run exactly along the surface,
+    // so the faces are nudged back a hair to keep the depth test from eating them.
+    val meshWall: MaterialInstance = loader.createArVisibleColor(WALL_COLOR).offsetForOutline()
+    val meshTop: MaterialInstance = loader.createArVisibleColor(TOP_COLOR).offsetForOutline()
+    val meshBottom: MaterialInstance = loader.createArVisibleColor(BOTTOM_COLOR).offsetForOutline()
+    val outline: MaterialInstance = loader.createColorInstance(
+        OUTLINE_COLOR,
+        metallic = 0f,
+        roughness = 1f,
+        reflectance = 0f,
+    )
+}
+
+private fun MaterialInstance.offsetForOutline(): MaterialInstance = apply {
+    setPolygonOffset(2f, 2f)
 }
 
 /**
@@ -135,6 +155,9 @@ fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
  * Mesh coordinates are metres in the model local frame (Y up, Z = −north before
  * rotation). [meshOrigin] is where that frame's origin sits on Earth and
  * [rotationDeg] turns its axes onto true north.
+ *
+ * Passing [outlines] — one list of index pairs per mesh — draws the model with its
+ * faces told apart by colour and its edges over the top.
  */
 fun buildMeshNodes(
     engine: Engine,
@@ -144,6 +167,7 @@ fun buildMeshNodes(
     meshOrigin: LatLngAlt?,
     rotationDeg: Float,
     heightOffsetMeters: Float = 0f,
+    outlines: List<List<Int>>? = null,
 ): List<Node> {
     if (meshes.isEmpty()) return emptyList()
 
@@ -151,17 +175,32 @@ fun buildMeshNodes(
     val east = offset?.east?.toFloat() ?: 0f
     val north = offset?.north?.toFloat() ?: 0f
     val up = (offset?.up?.toFloat() ?: 0f) + heightOffsetMeters
+    val place = Position(east, up, -north)
+    val turn = Position(0f, rotationDeg, 0f)
 
     val palette = listOf(materials.wall, materials.top, materials.bottom)
-    return meshes.mapIndexedNotNull { index, mesh ->
-        val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size]) ?: return@mapIndexedNotNull null
-        GeometryNode(engine, geometry, palette[index % palette.size]) {
-            culling(false)
-        }.apply {
-            position = Position(east, up, -north)
-            rotation = Position(0f, rotationDeg, 0f)
+    val nodes = mutableListOf<Node>()
+    meshes.forEachIndexed { index, mesh ->
+        if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return@forEachIndexed
+        val shading = shadingOf(mesh)
+        val body = if (outlines != null) {
+            facedMeshNode(engine, materials, mesh, shading)
+        } else {
+            plainMeshNode(
+                engine = engine,
+                mesh = mesh,
+                shading = shading,
+                color = MESH_COLORS[index % MESH_COLORS.size],
+                material = palette[index % palette.size],
+            )
+        }
+        body?.let { nodes += it.stand(place, turn) }
+        if (outlines != null) {
+            outlineMeshNode(engine, materials, mesh, shading, outlines.getOrNull(index).orEmpty())
+                ?.let { nodes += it.stand(place, turn) }
         }
     }
+    return nodes
 }
 
 private val MESH_COLORS = listOf(
@@ -170,44 +209,81 @@ private val MESH_COLORS = listOf(
     Float4(0.45f, 0.78f, 1f, 1f),
 )
 
-private fun buildMeshGeometry(engine: Engine, mesh: LocalMesh, color: Float4): Geometry? {
-    if (mesh.vertices.isEmpty() || mesh.indices.size < 3) return null
+private fun Node.stand(place: Position, turn: Position): Node = apply {
+    position = place
+    rotation = turn
+}
 
-    // Filament indexes natively; an out-of-range index takes the process down.
-    val indices = ArrayList<Int>(mesh.indices.size)
-    val normals = Array(mesh.vertices.size) { Float3(0f, 0f, 0f) }
-    var t = 0
-    while (t + 2 < mesh.indices.size) {
-        val ia = mesh.indices[t]
-        val ib = mesh.indices[t + 1]
-        val ic = mesh.indices[t + 2]
-        if (ia in mesh.vertices.indices && ib in mesh.vertices.indices && ic in mesh.vertices.indices) {
-            indices += ia
-            indices += ib
-            indices += ic
-            val a = mesh.vertices[ia]
-            val b = mesh.vertices[ib]
-            val c = mesh.vertices[ic]
-            val n = Float3(
-                (b.y - a.y) * (c.z - a.z) - (b.z - a.z) * (c.y - a.y),
-                (b.z - a.z) * (c.x - a.x) - (b.x - a.x) * (c.z - a.z),
-                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x),
-            )
-            normals[ia] = Float3(normals[ia].x + n.x, normals[ia].y + n.y, normals[ia].z + n.z)
-            normals[ib] = Float3(normals[ib].x + n.x, normals[ib].y + n.y, normals[ib].z + n.z)
-            normals[ic] = Float3(normals[ic].x + n.x, normals[ic].y + n.y, normals[ic].z + n.z)
-        }
-        t += 3
+private fun meshVertices(mesh: LocalMesh, normals: FloatArray, color: Float4) =
+    mesh.vertices.mapIndexed { i, v ->
+        Geometry.Vertex(
+            Float3(v.x, v.y, v.z),
+            Float3(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]),
+            Float2(0f, 0f),
+            color,
+        )
     }
-    if (indices.isEmpty()) return null
 
-    val vertices = mesh.vertices.mapIndexed { i, v ->
-        val n = normals[i]
-        val len = sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
-        val normal = if (len < 1e-6f) Float3(0f, 1f, 0f) else Float3(n.x / len, n.y / len, n.z / len)
-        Geometry.Vertex(Float3(v.x, v.y, v.z), normal, Float2(0f, 0f), color)
+private fun plainMeshNode(
+    engine: Engine,
+    mesh: LocalMesh,
+    shading: MeshShading,
+    color: Float4,
+    material: MaterialInstance,
+): GeometryNode? {
+    // Filament indexes natively; an out-of-range index takes the process down, so
+    // only the triangles the shading pass checked are drawn.
+    val indices = shading.walls + shading.tops + shading.bottoms
+    if (indices.size < 3) return null
+    val geometry = Geometry.Builder()
+        .vertices(meshVertices(mesh, shading.normals, color))
+        .indices(indices)
+        .build(engine)
+    return GeometryNode(engine, geometry, material) {
+        culling(false)
     }
-    return Geometry.Builder().vertices(vertices).indices(indices).build(engine)
+}
+
+private fun facedMeshNode(
+    engine: Engine,
+    materials: ArSolidMaterials,
+    mesh: LocalMesh,
+    shading: MeshShading,
+): GeometryNode? {
+    val groups = listOf(
+        shading.walls to materials.meshWall,
+        shading.tops to materials.meshTop,
+        shading.bottoms to materials.meshBottom,
+    ).filter { (indices, _) -> indices.isNotEmpty() }
+    if (groups.isEmpty()) return null
+    val geometry = Geometry.Builder()
+        .vertices(meshVertices(mesh, shading.normals, WALL_COLOR))
+        .primitivesIndices(groups.map { (indices, _) -> indices })
+        .build(engine)
+    return GeometryNode(
+        engine = engine,
+        geometry = geometry,
+        materialInstances = groups.map { (_, material) -> material },
+    ) {
+        culling(false)
+    }
+}
+
+private fun outlineMeshNode(
+    engine: Engine,
+    materials: ArSolidMaterials,
+    mesh: LocalMesh,
+    shading: MeshShading,
+    edges: List<Int>,
+): GeometryNode? {
+    if (edges.size < 2) return null
+    val geometry = Geometry.Builder(RenderableManager.PrimitiveType.LINES)
+        .vertices(meshVertices(mesh, shading.normals, OUTLINE_COLOR))
+        .indices(edges)
+        .build(engine)
+    return GeometryNode(engine, geometry, materials.outline) {
+        culling(false)
+    }
 }
 
 private fun buildWallGeometry(

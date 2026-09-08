@@ -6,15 +6,19 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,6 +61,7 @@ import com.arcoregeo.campoar.BuildConfig
 import com.arcoregeo.campoar.data.GeoPoint
 import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.data.LatLngAlt
+import com.arcoregeo.campoar.data.MeshEdgeCache
 import com.arcoregeo.campoar.data.openRing
 import com.arcoregeo.campoar.geo.DevicePose
 import com.arcoregeo.campoar.geo.GeoMath
@@ -184,6 +189,7 @@ fun ArScreen(
     var showMarkers by remember {
         mutableStateOf(document.polygons.isEmpty() && document.localMeshes.isEmpty())
     }
+    var showEdges by remember { mutableStateOf(false) }
     var sceneView by remember { mutableStateOf<ARSceneView?>(null) }
     var calibPanelOpen by remember { mutableStateOf(false) }
     var fixHint by remember { mutableStateOf<String?>(null) }
@@ -312,6 +318,7 @@ fun ArScreen(
                     solidHalfExtentM = solidHalfExtentM,
                     showSolid = showSolid,
                     showMarkers = showMarkers,
+                    showEdges = showEdges,
                     calibration = calibration,
                     rootAnchor = rootAnchor,
                     pose = pose,
@@ -384,6 +391,7 @@ fun ArScreen(
                         panelOpen = calibPanelOpen || calibMode != CalibMode.Idle,
                         showSolid = showSolid,
                         showMarkers = showMarkers,
+                        showEdges = showEdges,
                         gpsLocked = gpsLocked,
                         heightOffsetM = heightOffsetM,
                         placement = placement,
@@ -393,6 +401,7 @@ fun ArScreen(
                         },
                         onToggleSolid = { showSolid = !showSolid },
                         onToggleMarkers = { showMarkers = !showMarkers },
+                        onToggleEdges = { showEdges = !showEdges },
                         onBringHere = {
                             bringHereTick += 1
                             gpsLocked = false
@@ -593,6 +602,7 @@ private fun ArWorldScene(
     solidHalfExtentM: Float,
     showSolid: Boolean,
     showMarkers: Boolean,
+    showEdges: Boolean,
     calibration: ReferenceCalibration?,
     rootAnchor: Anchor?,
     pose: DevicePose?,
@@ -612,6 +622,7 @@ private fun ArWorldScene(
     val materialLoader = rememberMaterialLoader(engine)
     val modelLoader = rememberModelLoader(engine)
     val solidMaterials = remember(materialLoader) { ArSolidMaterials(materialLoader) }
+    val edgeCache = remember(document.id) { MeshEdgeCache(document.localMeshes) }
     var childNodes by remember { mutableStateOf(emptyList<Node>()) }
     var youNode by remember { mutableStateOf<CubeNode?>(null) }
     var sceneViewRef by remember { mutableStateOf<ARSceneView?>(null) }
@@ -660,7 +671,16 @@ private fun ArWorldScene(
         }
     }
 
-    LaunchedEffect(activeAnchor, activeCalib, targets, document.id, showSolid, showMarkers, heightOffsetM) {
+    LaunchedEffect(
+        activeAnchor,
+        activeCalib,
+        targets,
+        document.id,
+        showSolid,
+        showMarkers,
+        showEdges,
+        heightOffsetM,
+    ) {
         val anchor = activeAnchor
         val calib = activeCalib
         val previousRoot = childNodes.firstOrNull()
@@ -688,6 +708,7 @@ private fun ArWorldScene(
                     meshOrigin = document.meshOrigin,
                     rotationDeg = document.meshRotationDeg,
                     heightOffsetMeters = heightOffsetM,
+                    outlines = if (showEdges) edgeCache.edges() else null,
                 )
                 parts += meshNodes.size
                 meshNodes.forEach { root.addChildNode(it) }
@@ -973,18 +994,28 @@ private fun ArWorldScene(
     )
 }
 
+private val CONTROL_HEIGHT = 30.dp
+private val CONTROL_OFF = Color(0xB3334155)
+private val CONTROL_ON = Color(0xFF2563EB)
+
+/**
+ * The controls sit over the camera, so they are kept to two short rows: the second
+ * one scrolls sideways rather than growing a third row over the view.
+ */
 @Composable
 private fun ControlBar(
     refCount: Int,
     panelOpen: Boolean,
     showSolid: Boolean,
     showMarkers: Boolean,
+    showEdges: Boolean,
     gpsLocked: Boolean,
     heightOffsetM: Float,
     placement: Placement,
     onTogglePanel: () -> Unit,
     onToggleSolid: () -> Unit,
     onToggleMarkers: () -> Unit,
+    onToggleEdges: () -> Unit,
     onBringHere: () -> Unit,
     onToggleGpsLock: () -> Unit,
     onHeightUp: () -> Unit,
@@ -995,12 +1026,12 @@ private fun ControlBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
@@ -1012,98 +1043,93 @@ private fun ControlBar(
                 },
                 color = Color.White,
                 fontWeight = FontWeight.Bold,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 modifier = Modifier
                     .background(
                         when {
-                            gpsLocked -> Color(0xFF2563EB)
+                            gpsLocked -> CONTROL_ON
                             refCount >= 2 -> Color(0xFF16A34A)
                             refCount == 1 -> Color(0xFFCA8A04)
                             else -> Color(0xFF64748B)
                         },
                         RoundedCornerShape(20.dp),
                     )
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
             )
-            Button(
+            ControlButton(
+                label = if (gpsLocked) "Desanclar" else "Anclar GPS",
                 onClick = onToggleGpsLock,
+                container = if (gpsLocked) Color(0xFFDC2626) else CONTROL_ON,
                 enabled = placement != Placement.None || gpsLocked,
-                modifier = Modifier.height(40.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (gpsLocked) Color(0xFFDC2626) else Color(0xFF2563EB),
-                ),
-            ) {
-                Text(
-                    if (gpsLocked) "Desanclar GPS" else "Anclar GPS",
-                    color = Color.White,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            OutlinedButton(onClick = onBringHere, modifier = Modifier.height(40.dp)) {
-                Text("Traer aquí", color = Color.White, fontSize = 12.sp)
-            }
+            )
+            ControlButton("Traer aquí", onBringHere, CONTROL_OFF)
             if (placement == Placement.Local) {
-                OutlinedButton(
-                    onClick = onToggleGpsLock,
-                    modifier = Modifier.height(40.dp),
-                ) {
-                    Text("GPS real", color = Color(0xFF86EFAC), fontSize = 12.sp)
-                }
+                ControlButton("GPS real", onToggleGpsLock, Color(0xFF059669))
             }
         }
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Altura", color = Color.White, fontSize = 12.sp)
-            Button(
-                onClick = onHeightDown,
-                modifier = Modifier.size(44.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-            ) { Text("↓", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
+            ControlButton("↓", onHeightDown, CONTROL_OFF, modifier = Modifier.width(36.dp))
             Text(
                 String.format("%+.2f m", heightOffsetM),
                 color = Color(0xFFFBBF24),
                 fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
+                fontSize = 11.sp,
                 modifier = Modifier
                     .background(Color(0xCC0F172A), RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
             )
-            Button(
-                onClick = onHeightUp,
-                modifier = Modifier.size(44.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-            ) { Text("↑", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold) }
-            OutlinedButton(onClick = onHeightReset, modifier = Modifier.height(40.dp)) {
-                Text("0", color = Color.White, fontSize = 12.sp)
-            }
-            OutlinedButton(onClick = onTogglePanel, modifier = Modifier.height(40.dp)) {
-                Text(if (panelOpen) "Piso…" else "Piso", color = Color.White, fontSize = 12.sp)
-            }
+            ControlButton("↑", onHeightUp, CONTROL_OFF, modifier = Modifier.width(36.dp))
+            ControlButton("0", onHeightReset, CONTROL_OFF, modifier = Modifier.width(36.dp))
+            ControlButton(if (panelOpen) "Piso…" else "Piso", onTogglePanel, CONTROL_OFF)
+            ControlButton(
+                label = if (showEdges) "Aristas ON" else "Ver aristas / colores",
+                onClick = onToggleEdges,
+                container = if (showEdges) Color(0xFFEA580C) else CONTROL_OFF,
+            )
+            ControlButton(
+                label = if (showSolid) "Sólido ON" else "Sólido OFF",
+                onClick = onToggleSolid,
+                container = if (showSolid) CONTROL_ON else CONTROL_OFF,
+            )
+            ControlButton(
+                label = if (showMarkers) "Marcas ON" else "Marcas OFF",
+                onClick = onToggleMarkers,
+                container = if (showMarkers) CONTROL_ON else CONTROL_OFF,
+            )
+            ControlButton("Ocultar", onHideUi, CONTROL_OFF)
         }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(onClick = onToggleSolid, modifier = Modifier.weight(1f).height(40.dp)) {
-                Text(if (showSolid) "Sólido ON" else "Sólido OFF", color = Color.White, fontSize = 12.sp)
-            }
-            OutlinedButton(onClick = onToggleMarkers, modifier = Modifier.weight(1f).height(40.dp)) {
-                Text(if (showMarkers) "Marcas ON" else "Marcas OFF", color = Color.White, fontSize = 12.sp)
-            }
-            Button(
-                onClick = onHideUi,
-                modifier = Modifier.weight(1f).height(40.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155)),
-            ) {
-                Text("Ocultar", color = Color.White, fontSize = 12.sp)
-            }
-        }
+    }
+}
+
+@Composable
+private fun ControlButton(
+    label: String,
+    onClick: () -> Unit,
+    container: Color,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.height(CONTROL_HEIGHT),
+        shape = RoundedCornerShape(8.dp),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = container),
+    ) {
+        Text(
+            label,
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
     }
 }
 
