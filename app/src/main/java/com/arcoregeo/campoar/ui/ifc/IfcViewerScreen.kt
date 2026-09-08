@@ -57,6 +57,8 @@ import io.github.sceneview.rememberCameraNode
 import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberModelLoader
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 
 /** Palette used when the model is shown as one solid per chunk. */
@@ -98,7 +100,14 @@ fun IfcViewerScreen(
             sceneNodes = emptyList()
             return@LaunchedEffect
         }
-        applyDisplayMode(engine, materialLoader, edgeCache, current, edgeMode)
+        // Tracing the outline sorts every edge of the building, which is too long to
+        // spend on the thread that has to draw the next frame.
+        val outlines = if (edgeMode) {
+            withContext(Dispatchers.Default) { edgeCache.edges() }
+        } else {
+            emptyList()
+        }
+        applyDisplayMode(engine, materialLoader, outlines, current, edgeMode)
         sceneNodes = current.bodies.map { it.node } + current.bodies.mapNotNull { it.edgeNode }
     }
 
@@ -175,7 +184,7 @@ fun IfcViewerScreen(
                     )
                     Button(
                         onClick = { edgeMode = !edgeMode },
-                        enabled = ready != null,
+                        enabled = ready != null && ready.bodies.isNotEmpty(),
                         modifier = Modifier.height(32.dp),
                         shape = RoundedCornerShape(8.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
@@ -263,14 +272,14 @@ private class ViewerModel(
 )
 
 /**
- * Swaps the two ways of showing the model. Outlines are worked out and buffered the
- * first time they are asked for and hidden afterwards, so the button stays instant
+ * Swaps the two ways of showing the model. An outline is turned into buffers the
+ * first time it is asked for and only hidden afterwards, so the button stays instant
  * and a model nobody outlines never pays for it.
  */
 private fun applyDisplayMode(
     engine: Engine,
     materialLoader: MaterialLoader,
-    edgeCache: MeshEdgeCache,
+    outlines: List<List<Int>>,
     model: ViewerModel,
     edges: Boolean,
 ) {
@@ -285,7 +294,7 @@ private fun applyDisplayMode(
                     engine = engine,
                     materialLoader = materialLoader,
                     body = body,
-                    edges = edgeCache.edges().getOrNull(body.meshIndex).orEmpty(),
+                    edges = outlines.getOrNull(body.meshIndex).orEmpty(),
                 )
             }.getOrNull()
         }

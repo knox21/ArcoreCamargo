@@ -27,6 +27,12 @@ Al importar, el documento guarda un resumen de lo leído (sólidos, elementos, r
 
 El visor encuadra el modelo según su tamaño real: la cámara, sus planos de recorte y la órbita del gesto se calculan cuando ya se conocen las medidas del edificio. Con los valores por omisión de SceneView (plano lejano a 30 m) cualquier modelo de más de unos 12 m quedaba recortado por completo y la pantalla salía vacía, y volvía a vaciarse al primer arrastre.
 
+### Aristas y colores
+
+Cada cara sale del parser dibujada dos veces, una por lado, para que se vea desde dentro y desde fuera. Al promediar las normales por vértice las dos copias se anulaban y todas acababan apuntando hacia arriba, así que el edificio entero se iluminaba igual y se veía de un solo tono. Las normales se sacan ahora de una sola copia de cada cara, girada hacia fuera según el volumen que encierra el sólido.
+
+El botón **Ver aristas / colores**, en el visor y en la cámara, añade encima el contorno del modelo y pinta las caras por orientación (muros, losas altas y losas bajas). El contorno son los bordes abiertos y las aristas donde dos caras se cruzan en ángulo: dibujar todos los lados de los triángulos también dibujaría la diagonal que parte cada rectángulo en dos, y una fachada se convierte en ruido. Las caras se separan por posición antes de compararlas, porque cada una trae su propia copia de las esquinas.
+
 En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real. A más de 100 m el modelo se acerca sobre la línea que lo une contigo, conservando rumbo y orientación, y la pantalla avisa de la distancia real; al acercarte a menos de 80 m vuelve a escala real. Esto vale igual en modo GPS y en Geospatial.
 
 El sólido se apoya en el suelo que ves. Una altitud desconocida ya no se toma como nivel del mar: antes se restaba la altitud del GPS a un modelo sin ella, y el sólido acababa tantos kilómetros bajo tierra como alto esté el sitio.
@@ -80,6 +86,8 @@ Sin clave de ARCore la app **sí corre**: KMZ, mapa offline y AR por GPS. El chi
 2. En el predio: **Abrir cámara AR**, acepta cámara y ubicación precisa.
 3. Elige un punto abajo; la flecha indica hacia dónde caminar y la distancia.
 4. Cuando estés cerca, el pin se proyecta sobre la cámara. Con Geospatial activo, el pin 3D queda anclado al suelo.
+
+Los controles de la cámara van en dos filas cortas sobre la imagen; la segunda se desliza de lado para que no crezcan hacia abajo y tapen la vista.
 
 ## Requisitos del teléfono
 

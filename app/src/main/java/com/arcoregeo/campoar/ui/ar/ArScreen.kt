@@ -83,6 +83,8 @@ import io.github.sceneview.rememberEngine
 import io.github.sceneview.rememberMaterialLoader
 import io.github.sceneview.rememberModelLoader
 import io.github.sceneview.rememberOnGestureListener
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.atan2
 
@@ -341,7 +343,7 @@ fun ArScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .padding(12.dp),
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                 ) {
                     StatusChip(
                         placement = placement,
@@ -366,24 +368,26 @@ fun ArScreen(
                         Text(
                             hint,
                             color = Color(0xFFBFDBFE),
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
                             modifier = Modifier
-                                .padding(top = 6.dp)
+                                .padding(top = 4.dp)
                                 .background(Color(0xCC1E3A8A), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                     }
                     farViewDistanceM?.let { real ->
                         Text(
-                            "Vista lejana · el modelo está a ${GeoMath.formatDistance(real)}, " +
-                                "se acerca manteniendo su dirección y orientación",
+                            "Vista lejana · está a ${GeoMath.formatDistance(real)}, se acerca " +
+                                "manteniendo dirección y orientación",
                             color = Color(0xFFFDE68A),
-                            fontSize = 12.sp,
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier
-                                .padding(top = 6.dp)
+                                .padding(top = 4.dp)
                                 .background(Color(0xCC78350F), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                     }
                     ControlBar(
@@ -470,10 +474,12 @@ fun ArScreen(
                             msg,
                             color = Color(0xFF86EFAC),
                             fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
                             modifier = Modifier
-                                .padding(top = 8.dp)
+                                .padding(top = 4.dp)
                                 .background(Color(0xCC14532D), RoundedCornerShape(8.dp))
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 5.dp),
                         )
                     }
                     if (targets.isEmpty() && document.localMeshes.isEmpty()) {
@@ -556,7 +562,7 @@ fun ArScreen(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .background(Color(0xCC0F172A))
-                        .padding(12.dp),
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
                 ) {
                     items(targets, key = { it.id }) { point ->
                         val distance = pose?.let { GeoMath.distanceMeters(it.coordinate, point.coordinate) }
@@ -574,7 +580,7 @@ fun ArScreen(
                                     },
                                 )
                             },
-                            modifier = Modifier.padding(end = 8.dp),
+                            modifier = Modifier.padding(end = 6.dp),
                         )
                     }
                 }
@@ -691,6 +697,13 @@ private fun ArWorldScene(
             onSolidBuilt(0)
             return@LaunchedEffect
         }
+        // Tracing the outline sorts every edge of the building, which is too long to
+        // spend on the thread that has to draw the next camera frame.
+        val outlines = if (showSolid && showEdges) {
+            withContext(Dispatchers.Default) { edgeCache.edges() }
+        } else {
+            null
+        }
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
         if (showSolid) {
@@ -708,7 +721,7 @@ private fun ArWorldScene(
                     meshOrigin = document.meshOrigin,
                     rotationDeg = document.meshRotationDeg,
                     heightOffsetMeters = heightOffsetM,
-                    outlines = if (showEdges) edgeCache.edges() else null,
+                    outlines = outlines,
                 )
                 parts += meshNodes.size
                 meshNodes.forEach { root.addChildNode(it) }
@@ -1259,44 +1272,38 @@ private fun GpsRelativeHud(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 8.dp)
+            .padding(top = 6.dp)
             .background(Color(0xCC0F172A), RoundedCornerShape(10.dp))
-            .padding(12.dp),
+            .padding(horizontal = 10.dp, vertical = 7.dp),
     ) {
         Text(
             "TÚ (GPS) → terreno: ${GeoMath.formatDistance(distance)} · $headingHint",
             color = Color(0xFF86EFAC),
             fontWeight = FontWeight.Bold,
-            fontSize = 14.sp,
-        )
-        Text(
-            "Precisión ±${pose.accuracyMeters.toInt()} m · $modeNote",
-            color = Color(0xFFCBD5E1),
             fontSize = 12.sp,
-            modifier = Modifier.padding(top = 4.dp),
         )
         Text(
-            "Marcador verde = tu GPS. Naranja = sólido del IFC (ubicación real).",
-            color = Color(0xFF94A3B8),
-            fontSize = 11.sp,
-            modifier = Modifier.padding(top = 4.dp),
+            "Precisión ±${pose.accuracyMeters.toInt()} m · $modeNote · verde = tú, " +
+                "naranja = el IFC",
+            color = Color(0xFFCBD5E1),
+            fontSize = 10.sp,
+            lineHeight = 13.sp,
+            modifier = Modifier.padding(top = 2.dp),
         )
         if (farView) {
             Text(
-                "Está a ${GeoMath.formatDistance(distance)}: se dibuja cerca, girado " +
-                    "y orientado como en su sitio. Acércate a menos de 80 m para verlo " +
-                    "a su distancia real.",
+                "Acércate a menos de 80 m para verlo a su distancia real.",
                 color = Color(0xFFFBBF24),
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 6.dp),
+                fontSize = 10.sp,
+                modifier = Modifier.padding(top = 3.dp),
             )
         } else if (distance > 150 && placement != Placement.Local) {
             Text(
-                "Estás lejos del terreno. El sólido está a ${GeoMath.formatDistance(distance)} " +
-                    "en esa dirección — no en el centro de la cámara.",
+                "Estás lejos: el sólido está en esa dirección, no en el centro de la cámara.",
                 color = Color(0xFFFBBF24),
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 6.dp),
+                fontSize = 10.sp,
+                lineHeight = 13.sp,
+                modifier = Modifier.padding(top = 3.dp),
             )
         }
     }
@@ -1327,7 +1334,11 @@ private fun StatusChip(
         !hasApiKey -> "Sin API key ARCore · solo GPS"
         else -> "Iniciando AR… mueve el móvil despacio"
     }
-    AssistChip(onClick = {}, label = { Text(label) })
+    AssistChip(
+        onClick = {},
+        label = { Text(label, fontSize = 11.sp, maxLines = 1) },
+        modifier = Modifier.height(28.dp),
+    )
 }
 
 private fun placementLabel(placement: Placement, accuracy: Double?): String = when (placement) {
