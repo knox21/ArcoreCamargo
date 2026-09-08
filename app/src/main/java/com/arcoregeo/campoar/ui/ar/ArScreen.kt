@@ -102,26 +102,38 @@ private const val AR_FAR_M = 2_000f
 enum class Placement { None, Gps, Geospatial, Manual, Local }
 
 /**
- * Last GPS fix the solid was placed from. Rebuilding the model costs a frame, so it
+ * How the solid was last placed. Rebuilding the model costs a frame, so the placement
  * only follows real movement, a real turn, or entering/leaving the far view.
  */
-private class GpsFixMemo {
+private class PlacementMemo {
     private var fix: LatLngAlt? = null
     private var yaw = 0.0
-    private var farAway = false
+    private var earthTarget: LatLngAlt? = null
 
-    val wasFarAway: Boolean get() = farAway
+    var farAway = false
+        private set
 
-    fun shouldUpdate(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean): Boolean {
+    fun gpsMoved(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean): Boolean {
         val previous = fix ?: return true
         return newFarAway != farAway ||
             GeoMath.distanceMeters(previous, coordinate) > 1.5 ||
             abs(GeoMath.wrappedDeltaDegrees(yaw, newYaw)) > 8f
     }
 
-    fun remember(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean) {
+    fun rememberGps(coordinate: LatLngAlt, newYaw: Double, newFarAway: Boolean) {
         fix = coordinate
         yaw = newYaw
+        farAway = newFarAway
+    }
+
+    /** Earth anchors are absolute, so one is only replaced when its target moves. */
+    fun earthTargetMoved(target: LatLngAlt, newFarAway: Boolean): Boolean {
+        val previous = earthTarget ?: return true
+        return newFarAway != farAway || GeoMath.distanceMeters(previous, target) > 5.0
+    }
+
+    fun rememberEarth(target: LatLngAlt, newFarAway: Boolean) {
+        earthTarget = target
         farAway = newFarAway
     }
 }
@@ -451,6 +463,7 @@ fun ArScreen(
                             solidCentroid = solidCentroid,
                             placement = placement,
                             gpsLocked = gpsLocked,
+                            farView = farViewDistanceM != null,
                         )
                     }
                 }
@@ -591,7 +604,7 @@ private fun ArWorldScene(
     var handledBringHere by remember { mutableStateOf(0) }
     var handledResumeGps by remember { mutableStateOf(0) }
     var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
-    val lastFix = remember { GpsFixMemo() }
+    val lastPlacement = remember { PlacementMemo() }
 
     // The AR session callback outlives recompositions, so read the live values.
     val livePose by rememberUpdatedState(pose)
@@ -824,37 +837,60 @@ private fun ArWorldScene(
             // Frozen GPS pose: do not chase new fixes (stops the solid from jumping).
             if (liveGpsLocked && livePlacement == Placement.Gps) return@ARScene
 
+            // Where you are, as well as we can tell: the Earth pose beats the raw fix.
+            val viewerGeo = if (tracking && geoPose != null) {
+                LatLngAlt(geoPose.latitude, geoPose.longitude)
+            } else {
+                devicePose?.coordinate
+            }
+            // Past a hundred metres the model is a couple of pixels tall and GPS noise
+            // is bigger than the model, so it is drawn closer along the line that joins
+            // you to it. That keeps the bearing you look at and its own orientation.
+            val plan = farViewPlan(
+                centroid = centroid,
+                viewer = viewerGeo,
+                halfExtentM = liveHalfExtent,
+                wasFarAway = lastPlacement.farAway,
+            )
+
             // Geospatial only when we actually have a usable Earth pose. Never
             // block the GPS fallback if createAnchor fails.
             val geospatialOk = tracking &&
-                earth != null &&
                 centroid != null &&
                 geoAccuracy != null &&
                 geoAccuracy <= 25.0 &&
                 !liveGpsLocked
-            if (geospatialOk && livePlacement != Placement.Geospatial) {
+            if (geospatialOk) {
+                val target = plan.standoffOrigin ?: centroid
+                val stale = livePlacement != Placement.Geospatial ||
+                    lastPlacement.earthTargetMoved(target, plan.farAway)
+                if (!stale) {
+                    farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
+                    return@ARScene
+                }
                 val altitude = (geoPose?.altitude ?: 0.0) - EYE_HEIGHT_M
                 val anchor = runCatching {
-                    earth!!.createAnchor(
-                        centroid!!.latitude,
-                        centroid.longitude,
+                    earth.createAnchor(
+                        target.latitude,
+                        target.longitude,
                         altitude,
                         0f, 0f, 0f, 1f,
                     )
                 }.getOrNull()
                 if (anchor != null) {
-                    // Earth anchors are absolute, so this mode keeps true distance.
-                    farViewDistanceM = null
+                    lastPlacement.rememberEarth(target, plan.farAway)
+                    farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
                     replaceAnchor(
                         anchor,
-                        ReferenceCalibration(originGeo = centroid, yawDegrees = 0.0, refCount = 0),
+                        ReferenceCalibration(originGeo = target, yawDegrees = 0.0, refCount = 0),
                         Placement.Geospatial,
                     )
                     return@ARScene
                 }
             }
             if (livePlacement == Placement.Geospatial) {
-                farViewDistanceM = null
+                // Earth stopped tracking: keep the anchored model instead of jumping
+                // it into the GPS frame, which is the less accurate of the two.
                 return@ARScene
             }
 
@@ -866,28 +902,8 @@ private fun ArWorldScene(
                     atan2(-forward[0].toDouble(), forward[2].toDouble()),
                 )
                 val yaw = devicePose.headingDegrees - forwardAngle
-                // Far models are pulled in along the line that joins you to them, so
-                // the bearing you look at and the model's own orientation are kept.
-                val realDistance = centroid?.let {
-                    GeoMath.distanceMeters(devicePose.coordinate, it)
-                }
-                val farAway = centroid != null && realDistance != null &&
-                    realDistance > if (lastFix.wasFarAway) FAR_VIEW_EXIT_M else FAR_VIEW_TRIGGER_M
-                val originGeo = if (farAway) {
-                    farViewOrigin(
-                        centroid = centroid!!,
-                        viewer = devicePose.coordinate,
-                        standoffM = viewDistanceFor(liveHalfExtent).toDouble(),
-                    )
-                } else {
-                    devicePose.coordinate
-                }
-                // Quantized so the HUD is not recomposed on every AR frame.
-                farViewDistanceM = if (farAway) {
-                    Math.round(realDistance!! / 5.0) * 5.0
-                } else {
-                    null
-                }
+                val originGeo = plan.standoffOrigin ?: devicePose.coordinate
+                farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
                 val newCalib = ReferenceCalibration(
                     originGeo = originGeo,
                     yawDegrees = yaw,
@@ -901,12 +917,12 @@ private fun ArWorldScene(
                     )
                     runCatching { session.createAnchor(groundPose) }.getOrNull()?.let { anchor ->
                         replaceAnchor(anchor, newCalib, Placement.Gps)
-                        lastFix.remember(devicePose.coordinate, yaw, farAway)
+                        lastPlacement.rememberGps(devicePose.coordinate, yaw, plan.farAway)
                     }
-                } else if (!liveGpsLocked && lastFix.shouldUpdate(devicePose.coordinate, yaw, farAway)) {
+                } else if (lastPlacement.gpsMoved(devicePose.coordinate, yaw, plan.farAway)) {
                     // Compared against the last fix, not against the calibration origin,
                     // which in the far view sits next to the model instead of on you.
-                    lastFix.remember(devicePose.coordinate, yaw, farAway)
+                    lastPlacement.rememberGps(devicePose.coordinate, yaw, plan.farAway)
                     activeCalib = newCalib
                 }
             }
@@ -1148,6 +1164,7 @@ private fun GpsRelativeHud(
     solidCentroid: LatLngAlt,
     placement: Placement,
     gpsLocked: Boolean,
+    farView: Boolean,
 ) {
     val distance = GeoMath.distanceMeters(pose.coordinate, solidCentroid)
     val bearing = GeoMath.bearingDegrees(pose.coordinate, solidCentroid)
@@ -1162,7 +1179,8 @@ private fun GpsRelativeHud(
         "rumbo ${bearing.toInt()}°"
     }
     val modeNote = when {
-        placement == Placement.Local -> "DEMO ~25–30 m · pulsa GPS real para distancia GPS"
+        placement == Placement.Local -> "traído delante de ti · pulsa GPS real para su sitio"
+        farView -> "vista lejana · dibujado más cerca en su dirección real"
         gpsLocked -> "GPS ANCLADO · no salta"
         placement == Placement.Geospatial -> "posición Geospatial"
         placement == Placement.Gps -> "GPS libre (puede saltar)"
@@ -1194,10 +1212,19 @@ private fun GpsRelativeHud(
             fontSize = 11.sp,
             modifier = Modifier.padding(top = 4.dp),
         )
-        if (distance > 150 && placement != Placement.Local) {
+        if (farView) {
+            Text(
+                "Está a ${GeoMath.formatDistance(distance)}: se dibuja cerca, girado " +
+                    "y orientado como en su sitio. Acércate a menos de 80 m para verlo " +
+                    "a su distancia real.",
+                color = Color(0xFFFBBF24),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        } else if (distance > 150 && placement != Placement.Local) {
             Text(
                 "Estás lejos del terreno. El sólido está a ${GeoMath.formatDistance(distance)} " +
-                    "en esa dirección — no en el centro de la cámara. «Traer aquí» solo es demo.",
+                    "en esa dirección — no en el centro de la cámara.",
                 color = Color(0xFFFBBF24),
                 fontSize = 12.sp,
                 modifier = Modifier.padding(top = 6.dp),

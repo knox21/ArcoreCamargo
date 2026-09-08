@@ -36,6 +36,7 @@ import dev.romainguy.kotlin.math.Float4
 import io.github.sceneview.Scene
 import io.github.sceneview.geometries.Geometry
 import io.github.sceneview.loaders.MaterialLoader
+import io.github.sceneview.loaders.ModelLoader
 import io.github.sceneview.math.Position
 import io.github.sceneview.node.GeometryNode
 import io.github.sceneview.node.Node
@@ -56,38 +57,23 @@ fun IfcViewerScreen(
     val engine = rememberEngine()
     val modelLoader = rememberModelLoader(engine)
     val materialLoader = rememberMaterialLoader(engine)
-    var childNodes by remember { mutableStateOf<List<Node>>(emptyList()) }
-    var info by remember { mutableStateOf("Cargando modelo…") }
-    var lookTarget by remember { mutableStateOf(Position(0f, 0f, 0f)) }
-    var orbitHome by remember { mutableStateOf(Position(0f, 8f, 16f)) }
-
-    val cameraNode = rememberCameraNode(engine) {
-        position = orbitHome
-        lookAt(lookTarget)
-    }
-    val cameraManipulator = rememberCameraManipulator(
-        orbitHomePosition = orbitHome,
-        targetPosition = lookTarget,
-    )
+    var build by remember { mutableStateOf<ViewerBuild?>(null) }
 
     LaunchedEffect(document.id) {
-        val built = buildViewerNodes(engine, materialLoader, document.localMeshes)
-        childNodes = built.nodes
-        info = built.summary.ifBlank {
-            if (document.localMeshes.isEmpty()) {
-                "Este IFC no tiene malla 3D extraíble."
-            } else {
-                "${document.localMeshes.size} sólido(s)"
-            }
-        }
-        document.geometryNote?.let { note -> info = "$info · $note" }
-        val framing = framingFor(built.spanMeters)
-        lookTarget = built.lookAt
-        orbitHome = framing.cameraPosition
-        cameraNode.near = framing.near
-        cameraNode.far = framing.far
-        cameraNode.position = framing.cameraPosition
-        cameraNode.lookAt(built.lookAt)
+        build = buildViewerNodes(engine, materialLoader, document.localMeshes)
+    }
+
+    val ready = build
+    val info = buildString {
+        append(
+            when {
+                ready == null -> "Cargando modelo…"
+                ready.summary.isNotBlank() -> ready.summary
+                document.localMeshes.isEmpty() -> "Este IFC no tiene malla 3D extraíble."
+                else -> "${document.localMeshes.size} sólido(s)"
+            },
+        )
+        document.geometryNote?.let { note -> append(" · $note") }
     }
 
     Scaffold(
@@ -108,16 +94,12 @@ fun IfcViewerScreen(
                 .padding(padding)
                 .background(Color(0xFF0B1220)),
         ) {
-            if (childNodes.isNotEmpty()) {
-                Scene(
-                    modifier = Modifier.fillMaxSize(),
+            if (ready != null && ready.nodes.isNotEmpty()) {
+                ModelScene(
                     engine = engine,
                     modelLoader = modelLoader,
                     materialLoader = materialLoader,
-                    cameraNode = cameraNode,
-                    cameraManipulator = cameraManipulator,
-                    childNodes = childNodes,
-                    isOpaque = true,
+                    build = ready,
                 )
             } else {
                 Text(
@@ -154,6 +136,41 @@ fun IfcViewerScreen(
             }
         }
     }
+}
+
+/**
+ * The camera manipulator is built on its first composition and never again, and from
+ * the first touch onwards it owns the camera transform: whatever orbit home it was
+ * given is where the camera snaps back to. Composing the scene only once the model
+ * size is known is what keeps a large building on screen after the first drag.
+ */
+@Composable
+private fun ModelScene(
+    engine: Engine,
+    modelLoader: ModelLoader,
+    materialLoader: MaterialLoader,
+    build: ViewerBuild,
+) {
+    val framing = remember(build) { framingFor(build.spanMeters) }
+    val cameraNode = rememberCameraNode(engine) {
+        near = framing.near
+        far = framing.far
+        position = framing.cameraPosition
+        lookAt(build.lookAt)
+    }
+    Scene(
+        modifier = Modifier.fillMaxSize(),
+        engine = engine,
+        modelLoader = modelLoader,
+        materialLoader = materialLoader,
+        cameraNode = cameraNode,
+        cameraManipulator = rememberCameraManipulator(
+            orbitHomePosition = framing.cameraPosition,
+            targetPosition = build.lookAt,
+        ),
+        childNodes = build.nodes,
+        isOpaque = true,
+    )
 }
 
 private data class ViewerBuild(

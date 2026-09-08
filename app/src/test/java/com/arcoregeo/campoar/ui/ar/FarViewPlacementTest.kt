@@ -7,6 +7,8 @@ import com.arcoregeo.campoar.data.Vec3f
 import com.arcoregeo.campoar.geo.GeoMath
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.atan2
@@ -100,5 +102,47 @@ class FarViewPlacementTest {
         assertTrue(60.0 < FAR_VIEW_TRIGGER_M)
         assertEquals(60.0, sqrt(enu.east * enu.east + enu.north * enu.north), 0.2)
         assertEquals(-60.0, enu.east, 0.2)
+    }
+
+    @Test
+    fun `the plan only pulls in a model past the trigger`() {
+        val near = GeoMath.destination(centroid, 20.0, 60.0)
+        val far = GeoMath.destination(centroid, 20.0, 300.0)
+
+        val nearPlan = farViewPlan(centroid, near, halfExtentM = 15f, wasFarAway = false)
+        assertFalse(nearPlan.farAway)
+        assertEquals(60.0, nearPlan.realDistanceM!!, 0.5)
+
+        val farPlan = farViewPlan(centroid, far, halfExtentM = 15f, wasFarAway = false)
+        assertTrue(farPlan.farAway)
+        assertEquals(300.0, farPlan.realDistanceM!!, 0.5)
+        assertEquals(
+            viewDistanceFor(15f).toDouble(),
+            GeoMath.distanceMeters(farPlan.standoffOrigin!!, centroid),
+            0.5,
+        )
+    }
+
+    /** Between the two thresholds the answer depends on where it was, not on noise. */
+    @Test
+    fun `leaving the far view needs a shorter distance than entering it`() {
+        val between = GeoMath.destination(centroid, 20.0, 90.0)
+
+        assertFalse(farViewPlan(centroid, between, 15f, wasFarAway = false).farAway)
+        assertTrue(farViewPlan(centroid, between, 15f, wasFarAway = true).farAway)
+    }
+
+    @Test
+    fun `a plan without a fix places nothing`() {
+        assertFalse(farViewPlan(centroid, null, 15f, wasFarAway = false).farAway)
+        assertNull(farViewPlan(null, centroid, 15f, wasFarAway = false).realDistanceM)
+    }
+
+    @Test
+    fun `the reported distance is rounded so the hud does not flicker`() {
+        val viewer = GeoMath.destination(centroid, 20.0, 302.0)
+        val plan = farViewPlan(centroid, viewer, 15f, wasFarAway = false)
+
+        assertEquals(300.0, plan.roundedDistanceM!!, 0.001)
     }
 }

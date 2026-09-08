@@ -38,6 +38,46 @@ internal fun farViewOrigin(
     distanceMeters = standoffM,
 )
 
+/**
+ * How the solid is placed this frame: [standoffOrigin] is set only when the model is
+ * too far to be seen where it really is, and is then the ENU origin to draw it from.
+ */
+internal data class FarViewPlan(
+    val realDistanceM: Double?,
+    val standoffOrigin: LatLngAlt?,
+) {
+    val farAway: Boolean get() = standoffOrigin != null
+
+    /** Rounded so walking a step does not recompose the HUD. */
+    val roundedDistanceM: Double?
+        get() = realDistanceM?.let { Math.round(it / 5.0) * 5.0 }
+}
+
+/**
+ * Decides whether the model has to be pulled in towards [viewer]. Entering the far
+ * view needs [FAR_VIEW_TRIGGER_M] and leaving it only [FAR_VIEW_EXIT_M], so GPS noise
+ * around the threshold cannot flap between the two placements.
+ */
+internal fun farViewPlan(
+    centroid: LatLngAlt?,
+    viewer: LatLngAlt?,
+    halfExtentM: Float,
+    wasFarAway: Boolean,
+): FarViewPlan {
+    if (centroid == null || viewer == null) return FarViewPlan(null, null)
+    val distance = GeoMath.distanceMeters(viewer, centroid)
+    val threshold = if (wasFarAway) FAR_VIEW_EXIT_M else FAR_VIEW_TRIGGER_M
+    if (distance <= threshold) return FarViewPlan(distance, null)
+    return FarViewPlan(
+        realDistanceM = distance,
+        standoffOrigin = farViewOrigin(
+            centroid = centroid,
+            viewer = viewer,
+            standoffM = viewDistanceFor(halfExtentM).toDouble(),
+        ),
+    )
+}
+
 /** Where the solid is and how big it is, for aiming the camera at it. */
 internal data class SolidExtent(
     val centroid: LatLngAlt?,
