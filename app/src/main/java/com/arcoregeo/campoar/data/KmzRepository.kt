@@ -1,5 +1,6 @@
 package com.arcoregeo.campoar.data
 
+import android.app.ActivityManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -10,10 +11,18 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.UUID
 
-private const val MAX_IFC_BYTES = 220L * 1024 * 1024
-
 class KmzRepository(context: Context) {
     private val appContext = context.applicationContext
+
+    /**
+     * A STEP file needs roughly 2.5× its size in heap while it is being indexed
+     * (measured on Revit-style exports), so the ceiling follows the device heap.
+     */
+    private val maxIfcBytes: Long by lazy {
+        val heapMb = (appContext.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)
+            ?.largeMemoryClass ?: 256
+        (heapMb * 4L / 10L).coerceIn(48L, 400L) * 1024 * 1024
+    }
     private val libraryDir = File(appContext.filesDir, "kmz").apply { mkdirs() }
     private val indexFile = File(libraryDir, "index.json")
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
@@ -79,25 +88,20 @@ class KmzRepository(context: Context) {
     suspend fun importIfcFromUri(uri: Uri, displayName: String): KmzDocument = withContext(Dispatchers.IO) {
         val name = resolveDisplayName(uri, displayName, "modelo.ifc")
         val size = querySize(uri)
-        if (size != null && size > MAX_IFC_BYTES) {
+        if (size != null && size > maxIfcBytes) {
             error(
-                "El IFC pesa ${size / (1024 * 1024)} MB y supera el límite de " +
-                    "${MAX_IFC_BYTES / (1024 * 1024)} MB. Expórtalo por disciplina o sin mobiliario.",
+                "El IFC pesa ${size / (1024 * 1024)} MB y este teléfono admite hasta " +
+                    "${maxIfcBytes / (1024 * 1024)} MB. Expórtalo por disciplina o sin mobiliario.",
             )
         }
-        // STEP files are Latin-1 by spec; decoding straight from the stream avoids
-        // holding the raw bytes and the string at the same time.
-        val text = try {
+        // STEP files are Latin-1 by spec. Parsing straight off the stream keeps a
+        // 100 MB Revit export from sitting in the heap as one string.
+        val document = try {
             appContext.contentResolver.openInputStream(uri)?.use { stream ->
-                stream.bufferedReader(Charsets.ISO_8859_1).readText()
+                IfcGeoParser.parse(name, stream.bufferedReader(Charsets.ISO_8859_1))
             } ?: error("No se pudo abrir el IFC")
         } catch (oom: OutOfMemoryError) {
-            error("El IFC es demasiado grande para este teléfono. Exporta una parte del modelo.")
-        }
-        val document = try {
-            IfcGeoParser.parse(name, text)
-        } catch (oom: OutOfMemoryError) {
-            error("El IFC tiene demasiada geometría para este teléfono. Exporta menos categorías.")
+            error("El IFC tiene demasiada geometría para este teléfono. Exporta menos categorías o por disciplina.")
         }
         store(document)
     }

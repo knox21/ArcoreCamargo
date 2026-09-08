@@ -1,5 +1,7 @@
 package com.arcoregeo.campoar.data
 
+import java.io.Reader
+import java.io.StringReader
 import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.abs
@@ -138,8 +140,10 @@ object IfcGeoParser {
         "IFCDOCUMENT", "IFCTASK", "IFCACTOR", "IFCCONSTRAINT", "IFCOBJECTIVE",
     )
 
-    fun parse(fileName: String, text: String): KmzDocument {
-        val model = readModel(text)
+    fun parse(fileName: String, text: String): KmzDocument = parse(fileName, StringReader(text))
+
+    fun parse(fileName: String, source: Reader): KmzDocument {
+        val model = readModel(source)
         val meshes = mutableListOf<LocalMesh>()
         val footprints = mutableListOf<Pair<String, List<LocalPoint2>>>()
         var maxHeight = 0f
@@ -727,9 +731,9 @@ object IfcGeoParser {
 
     // --- STEP reading ------------------------------------------------------------
 
-    private fun readModel(text: String): Model {
+    private fun readModel(source: Reader): Model {
         val model = Model()
-        forEachStatement(text) { statement ->
+        forEachStatement(source) { statement ->
             val eq = statement.indexOf('=')
             if (eq < 0) return@forEachStatement
             val open = statement.indexOf('(', eq + 1)
@@ -763,41 +767,58 @@ object IfcGeoParser {
         return out
     }
 
-    private inline fun forEachStatement(text: String, action: (String) -> Unit) {
-        val dataStart = text.indexOf("DATA;").let { if (it >= 0) it + 5 else 0 }
+    /**
+     * Streams `#id=TYPE(...);` statements without materialising the whole file:
+     * a Revit export can be hundreds of megabytes. Header statements are ignored
+     * because they do not start with `#`.
+     */
+    private fun forEachStatement(source: Reader, action: (String) -> Unit) {
+        val buffer = CharArray(1 shl 16)
         val current = StringBuilder(256)
         var inString = false
-        var i = dataStart
-        while (i < text.length) {
-            val ch = text[i]
-            when {
-                inString -> {
-                    current.append(ch)
-                    if (ch == '\'') {
-                        if (i + 1 < text.length && text[i + 1] == '\'') {
-                            current.append('\'')
-                            i++
-                        } else {
-                            inString = false
+        // A quote inside a string may be the closing one or the first half of ''.
+        var pendingQuote = false
+
+        fun flush() {
+            val statement = current.toString().trim()
+            current.setLength(0)
+            if (statement.startsWith("#")) action(statement)
+        }
+
+        while (true) {
+            val read = source.read(buffer)
+            if (read < 0) break
+            var i = 0
+            while (i < read) {
+                val ch = buffer[i]
+                i++
+                if (inString) {
+                    if (pendingQuote) {
+                        pendingQuote = false
+                        if (ch == '\'') {
+                            current.append("''")
+                            continue
                         }
+                        current.append('\'')
+                        inString = false
+                    } else {
+                        if (ch == '\'') pendingQuote = true else current.append(ch)
+                        continue
                     }
                 }
-                ch == '\'' -> {
-                    inString = true
-                    current.append(ch)
+                when {
+                    ch == '\'' -> {
+                        inString = true
+                        current.append(ch)
+                    }
+                    ch == ';' -> flush()
+                    ch == '\n' || ch == '\r' -> current.append(' ')
+                    else -> current.append(ch)
                 }
-                ch == ';' -> {
-                    val statement = current.toString().trim()
-                    current.setLength(0)
-                    if (statement.startsWith("#")) action(statement)
-                }
-                ch == '\n' || ch == '\r' -> current.append(' ')
-                else -> current.append(ch)
             }
-            i++
         }
-        val tail = current.toString().trim()
-        if (tail.startsWith("#")) action(tail)
+        if (pendingQuote) current.append('\'')
+        flush()
     }
 
     private fun splitArgs(input: String): List<String> {
