@@ -31,6 +31,21 @@ data class GeoPolygon(
     val ring: List<LatLngAlt>,
 )
 
+/** Local XYZ mesh in metres (Y-up, for SceneView / AR). */
+@Serializable
+data class Vec3f(
+    val x: Float,
+    val y: Float,
+    val z: Float,
+)
+
+@Serializable
+data class LocalMesh(
+    val name: String,
+    val vertices: List<Vec3f>,
+    val indices: List<Int>,
+)
+
 @Serializable
 data class KmzDocument(
     val id: String,
@@ -42,11 +57,19 @@ data class KmzDocument(
     val polygons: List<GeoPolygon> = emptyList(),
     /** Extrusion height when the source was an IFC solid. */
     val solidHeightMeters: Float? = null,
+    /** kml | kmz | ifc */
+    val sourceKind: String = "kml",
+    val isGeoreferenced: Boolean = false,
+    /** Local 3D meshes for the IFC viewer (and non-geo solids). */
+    val localMeshes: List<LocalMesh> = emptyList(),
 ) {
-    val featureCount: Int get() = points.size + lines.size + polygons.size
+    val featureCount: Int get() = points.size + lines.size + polygons.size + localMeshes.size
 
-    /** Vertices for navigation chips / AR. Does not include the geometric centroid
-     *  (that looked like "you are here" in the middle of the solid). */
+    val isIfc: Boolean get() = sourceKind.equals("ifc", ignoreCase = true) ||
+        fileName.endsWith(".ifc", ignoreCase = true) ||
+        localMeshes.isNotEmpty()
+
+    /** Vertices for navigation chips / AR. Does not include the geometric centroid. */
     fun arTargets(): List<GeoPoint> {
         if (points.isNotEmpty()) return points
         val fromPolygons = polygons.flatMap { polygon ->

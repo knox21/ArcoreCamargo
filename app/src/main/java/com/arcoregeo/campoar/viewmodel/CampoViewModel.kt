@@ -132,14 +132,17 @@ class CampoViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun importIfc(uri: Uri, displayName: String) {
         runCatching { repository.importIfcFromUri(uri, displayName) }
             .onSuccess { doc ->
-                val height = doc.solidHeightMeters?.let { " · altura ${it.toInt()} m" }.orEmpty()
+                val geo = if (doc.isGeoreferenced) "georref." else "solo local"
+                val meshes = doc.localMeshes.size
+                val verts = doc.polygons.firstOrNull()?.let { openRingSize(it.ring) } ?: 0
                 _state.update {
                     it.copy(
                         documents = repository.listDocuments(),
                         selected = doc,
                         selectedPointId = doc.arTargets().firstOrNull()?.id,
                         importing = false,
-                        message = "IFC cargado: ${doc.fileName} · ${doc.polygons.firstOrNull()?.ring?.size ?: 0} vértices$height",
+                        message = "IFC: ${doc.fileName} · $meshes malla(s) · $geo" +
+                            if (verts > 0) " · $verts vértices mapa" else " · usa Ver IFC 3D",
                     )
                 }
             }
@@ -151,6 +154,17 @@ class CampoViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+    }
+
+    private fun openRingSize(ring: List<com.arcoregeo.campoar.data.LatLngAlt>): Int {
+        if (ring.size < 2) return ring.size
+        val first = ring.first()
+        val last = ring.last()
+        return if (first.latitude == last.latitude && first.longitude == last.longitude) {
+            ring.size - 1
+        } else {
+            ring.size
+        }
     }
 
     fun select(document: KmzDocument) {

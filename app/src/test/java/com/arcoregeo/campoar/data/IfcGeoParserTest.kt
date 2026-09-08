@@ -104,6 +104,9 @@ class IfcGeoParserTest {
         assertEquals(1, doc.polygons.size)
         assertEquals(3f, doc.solidHeightMeters)
         assertEquals("Poligono_sin_titulo", doc.polygons.first().name)
+        assertTrue(doc.isGeoreferenced)
+        assertTrue(doc.localMeshes.isNotEmpty())
+        assertTrue(doc.localMeshes.first().indices.size >= 12)
 
         val ring = openRing(doc.polygons.first().ring)
         assertEquals(4, ring.size)
@@ -121,6 +124,46 @@ class IfcGeoParserTest {
         // Footprint is roughly 10 m across.
         val width = GeoDistance.meters(ring[0], ring[1])
         assertTrue("edge was $width m", width in 3.0..20.0)
+    }
+
+    private val ifcIndexedPolyCurve = """
+        ISO-10303-21;
+        DATA;
+        #1=IFCCARTESIANPOINTLIST2D(((0.,0.),(8.,0.),(8.,5.),(0.,5.)));
+        #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3,4,1))),.F.);
+        #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,'Box',#2);
+        #4=IFCEXTRUDEDAREASOLID(#3,#5,#6,2.500);
+        ENDSEC;
+        END-ISO-10303-21;
+    """.trimIndent()
+
+    @Test
+    fun `imports non georeferenced indexed polycurve as local mesh`() {
+        val doc = IfcGeoParser.parse("local_box.ifc", ifcIndexedPolyCurve)
+        assertEquals("ifc", doc.sourceKind)
+        assertTrue(!doc.isGeoreferenced)
+        assertTrue(doc.polygons.isEmpty())
+        assertEquals(1, doc.localMeshes.size)
+        assertEquals(2.5f, doc.solidHeightMeters)
+        assertTrue(doc.localMeshes.first().vertices.size >= 4)
+    }
+
+    private val ifcTriangulated = """
+        ISO-10303-21;
+        DATA;
+        #1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,1.)));
+        #2=IFCTRIANGULATEDFACESET(#1,${'$'},.T.,((1,2,3),(1,2,4),(1,3,4),(2,3,4)),${'$'});
+        ENDSEC;
+        END-ISO-10303-21;
+    """.trimIndent()
+
+    @Test
+    fun `imports triangulated face set without georef`() {
+        val doc = IfcGeoParser.parse("tet.ifc", ifcTriangulated)
+        assertTrue(doc.localMeshes.isNotEmpty())
+        assertEquals(4, doc.localMeshes.first().vertices.size)
+        assertEquals(12, doc.localMeshes.first().indices.size)
+        assertTrue(!doc.isGeoreferenced)
     }
 
     private object GeoDistance {

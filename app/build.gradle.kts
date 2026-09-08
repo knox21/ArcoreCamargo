@@ -73,6 +73,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons)
     implementation(libs.arcore)
     implementation(libs.sceneview.ar)
+    implementation("io.github.sceneview:sceneview:2.2.1")
     implementation(libs.play.services.location)
     implementation(libs.maplibre)
     implementation(libs.kotlinx.coroutines.android)

@@ -1,14 +1,25 @@
 # CampoAR
 
-App Android para ubicar puntos de un **KMZ/KML** en el terreno con la cámara, GPS y ARCore Geospatial.
+App Android para ubicar puntos de un **KMZ/KML** en el terreno con la cámara, GPS y ARCore Geospatial, y para **ver IFC en 3D**.
 
 ## Qué hace
 
-1. Importa un KMZ o KML (selector de archivos o “Compartir con CampoAR”).
-2. Muestra los puntos, líneas y polígonos en un mapa.
-3. Descarga esa zona **antes de ir a campo**, para usarla sin red.
-4. Abre la cámara AR: flecha de rumbo, distancia y pines sobre el paisaje.
-5. Si hay internet, cobertura Street View y una clave de ARCore, ancla los puntos con **Geospatial (VPS)** para más precisión.
+1. Importa KMZ, KML o **IFC** (selector de archivos o “Compartir con CampoAR”).
+2. En la lista: botón **Ver IFC 3D** (visor con órbita) y **Mapa / AR** si el IFC está georreferenciado.
+3. Muestra puntos, líneas y polígonos en un mapa.
+4. Descarga esa zona **antes de ir a campo**, para usarla sin red.
+5. Abre la cámara AR: flecha de rumbo, distancia y sólido anclado.
+6. Si hay internet, cobertura Street View y una clave de ARCore, ancla con **Geospatial (VPS)**.
+
+## IFC
+
+El lector acepta, entre otros:
+
+- `IfcExtrudedAreaSolid` con perfil `Polyline`, `IndexedPolyCurve`, rectángulo o círculo
+- `IfcTriangulatedFaceSet` / `IfcPolygonalFaceSet` / `IfcPolyLoop`
+- Con o **sin** georreferencia (`IfcSite` / `IfcMapConversion`)
+
+Sin georreferencia igual puedes abrir el visor 3D. Para mapa/AR el IFC debe traer coordenadas geográficas.
 
 ## Geospatial no sustituye el modo offline
 

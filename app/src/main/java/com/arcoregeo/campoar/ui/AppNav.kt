@@ -16,6 +16,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.arcoregeo.campoar.ui.ar.ArScreen
 import com.arcoregeo.campoar.ui.home.HomeScreen
+import com.arcoregeo.campoar.ui.ifc.IfcViewerScreen
 import com.arcoregeo.campoar.ui.map.MapScreen
 import com.arcoregeo.campoar.viewmodel.CampoViewModel
 
@@ -44,6 +45,10 @@ fun CampoArRoot(viewModel: CampoViewModel) {
                         viewModel.select(document)
                         navController.navigate("map/${document.id}")
                     },
+                    onOpenIfc3d = { document ->
+                        viewModel.select(document)
+                        navController.navigate("ifc3d/${document.id}")
+                    },
                     onDelete = viewModel::delete,
                 )
             }
@@ -61,6 +66,19 @@ fun CampoArRoot(viewModel: CampoViewModel) {
                         onDownloadOffline = viewModel::downloadOfflineMap,
                         onOpenAr = { navController.navigate("ar/${document.id}") },
                         onSelectPoint = viewModel::selectPoint,
+                    )
+                }
+            }
+            composable(
+                route = "ifc3d/{id}",
+                arguments = listOf(navArgument("id") { type = NavType.StringType }),
+            ) { entry ->
+                val id = entry.arguments?.getString("id")
+                val document = state.documents.firstOrNull { it.id == id } ?: state.selected
+                if (document != null) {
+                    IfcViewerScreen(
+                        document = document,
+                        onBack = { navController.popBackStack() },
                     )
                 }
             }

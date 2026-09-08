@@ -16,6 +16,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Map
 import androidx.compose.material.icons.outlined.UploadFile
+import androidx.compose.material.icons.outlined.ViewInAr
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
@@ -23,11 +26,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.viewmodel.CampoUiState
@@ -41,6 +47,7 @@ fun HomeScreen(
     onImportPolygonSample: () -> Unit,
     onImportArequipaSample: () -> Unit,
     onOpen: (KmzDocument) -> Unit,
+    onOpenIfc3d: (KmzDocument) -> Unit,
     onDelete: (KmzDocument) -> Unit,
 ) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -61,11 +68,13 @@ fun HomeScreen(
                         "application/vnd.google-earth.kml+xml",
                         "application/xml",
                         "text/xml",
+                        "application/x-step",
+                        "model/ifc",
                         "*/*",
                     ),
                 )
             }) {
-                Icon(Icons.Outlined.UploadFile, contentDescription = "Importar KMZ")
+                Icon(Icons.Outlined.UploadFile, contentDescription = "Importar KMZ/IFC")
             }
         },
     ) { padding ->
@@ -81,7 +90,7 @@ fun HomeScreen(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                androidx.compose.material3.OutlinedButton(
+                OutlinedButton(
                     onClick = onImportArequipaSample,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -91,13 +100,13 @@ fun HomeScreen(
             if (state.documents.isEmpty()) {
                 Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        text = "Importa un KMZ o KML. En AR: fija ref 1 tocando el piso en un vértice para estabilizar. El sólido 3D (IFC/GLB) se ancla con esa referencia.",
+                        text = "Importa KMZ, KML o IFC. En IFC puedes abrir el visor 3D o, si está georreferenciado, el mapa/AR.",
                         style = MaterialTheme.typography.bodyLarge,
                     )
-                    androidx.compose.material3.OutlinedButton(onClick = onImportSample) {
+                    OutlinedButton(onClick = onImportSample) {
                         Text("Cargar ejemplo de puntos")
                     }
-                    androidx.compose.material3.OutlinedButton(onClick = onImportPolygonSample) {
+                    OutlinedButton(onClick = onImportPolygonSample) {
                         Text("Cargar ejemplo de polígono (Google Earth)")
                     }
                 }
@@ -107,29 +116,84 @@ fun HomeScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     items(state.documents, key = { it.id }) { document ->
-                        Card(onClick = { onOpen(document) }, modifier = Modifier.fillMaxWidth()) {
-                            Row(
-                                modifier = Modifier.padding(16.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(document.fileName, style = MaterialTheme.typography.titleMedium)
-                                    Text(
-                                        "${document.points.size} puntos · ${document.lines.size} líneas · ${document.polygons.size} polígonos" +
-                                            if (document.fileName.contains("arequipa", ignoreCase = true) ||
-                                                document.polygons.isNotEmpty()
-                                            ) " · Sólido 3D listo" else "",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                                Icon(Icons.Outlined.Map, contentDescription = null)
-                                IconButton(onClick = { onDelete(document) }) {
-                                    Icon(Icons.Outlined.Delete, contentDescription = "Eliminar")
-                                }
-                            }
-                        }
+                        DocumentCard(
+                            document = document,
+                            onOpen = { onOpen(document) },
+                            onOpenIfc3d = { onOpenIfc3d(document) },
+                            onDelete = { onDelete(document) },
+                        )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DocumentCard(
+    document: KmzDocument,
+    onOpen: () -> Unit,
+    onOpenIfc3d: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val canMap = document.arTargets().isNotEmpty() || document.polygons.isNotEmpty()
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(document.fileName, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        buildString {
+                            if (document.isIfc) {
+                                append("IFC")
+                                append(" · ${document.localMeshes.size} malla(s)")
+                                if (document.isGeoreferenced) append(" · georref.")
+                                else append(" · local")
+                                document.solidHeightMeters?.let { append(" · ${it.toInt()} m") }
+                            } else {
+                                append("${document.points.size} puntos · ${document.lines.size} líneas · ${document.polygons.size} polígonos")
+                            }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Outlined.Delete, contentDescription = "Eliminar")
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (document.isIfc && document.localMeshes.isNotEmpty()) {
+                    Button(
+                        onClick = onOpenIfc3d,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEA580C)),
+                    ) {
+                        Icon(Icons.Outlined.ViewInAr, contentDescription = null)
+                        Text("  Ver IFC 3D")
+                    }
+                }
+                OutlinedButton(
+                    onClick = onOpen,
+                    enabled = canMap,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Outlined.Map, contentDescription = null)
+                    Text(if (document.isIfc) "  Mapa / AR" else "  Abrir")
+                }
+            }
+            if (document.isIfc && !document.isGeoreferenced) {
+                Text(
+                    "Sin georreferencia: puedes verlo en 3D. Para mapa/AR necesita IfcSite o IfcMapConversion.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
