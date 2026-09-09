@@ -35,6 +35,10 @@ class GeoMathEnuTest {
         val target = GeoMath.destination(arequipa, bearingDegrees = 90.0, distanceMeters = 50.0)
         val enu = GeoMath.toEnu(arequipa, LatLngAlt(target.latitude, target.longitude))
 
+        assertEquals(50.0, enu.east, 0.2)
+        assertEquals(0.0, enu.north, 0.2)
+    }
+
     @Test
     fun `a 90 degree yaw turns east into north`() {
         val (east, north) = GeoMath.rotateYaw(10.0, 0.0, 90.0)
