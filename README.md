@@ -33,7 +33,7 @@ Cada cara sale del parser dibujada dos veces, una por lado, para que se vea desd
 
 El botón **Ver aristas / colores**, en el visor y en la cámara, añade encima el contorno del modelo y pinta las caras por orientación (muros, losas altas y losas bajas). El contorno son los bordes abiertos y las aristas donde dos caras se cruzan en ángulo: dibujar todos los lados de los triángulos también dibujaría la diagonal que parte cada rectángulo en dos, y una fachada se convierte en ruido. Las caras se separan por posición antes de compararlas, porque cada una trae su propia copia de las esquinas.
 
-Al abrir la cámara el sólido se dibuja como antes. Las aristas no se calculan hasta que pulsas el botón, y se pintan con cintas de triángulos: el material de SceneView en Android no trae el sombreador de líneas y pedirlo cerraba la app.
+Al abrir la cámara el sólido se dibuja con las mismas caras que el visor (muros, losas y contorno). La malla se arma una vez: reconstruirla en cada salto de GPS es lo que cerraba la app al pedir sombras o aristas. El GPS de arranque se promedia unos segundos, ponderado por precisión, para que el modelo no salte con la primera lectura ruidosa.
 
 En la cámara AR se dibuja la misma malla del visor, orientada a norte (incluye la convergencia de meridianos de UTM) y anclada en su coordenada real. A más de 100 m el modelo se acerca sobre la línea que lo une contigo, conservando rumbo y orientación, y la pantalla avisa de la distancia real; al acercarte a menos de 80 m vuelve a escala real. Esto vale igual en modo GPS y en Geospatial.
 

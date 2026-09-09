@@ -27,6 +27,8 @@ data class DevicePose(
     val accuracyMeters: Float,
     val headingDegrees: Float,
     val hasHeading: Boolean,
+    /** False until enough GPS samples have been averaged to pin the model. */
+    val stable: Boolean = true,
 )
 
 class LocationRepository(context: Context) {
@@ -43,12 +45,17 @@ class LocationRepository(context: Context) {
 
     @SuppressLint("MissingPermission")
     fun poseFlow(): Flow<DevicePose> {
+        val smoother = PoseSmoother()
         return combine(locationFlow(), headingFlow()) { location, heading ->
-            DevicePose(
-                coordinate = LatLngAlt(location.latitude, location.longitude, location.altitude),
-                accuracyMeters = location.accuracy,
-                headingDegrees = heading ?: 0f,
-                hasHeading = heading != null,
+            smoother.observe(
+                DevicePose(
+                    coordinate = LatLngAlt(location.latitude, location.longitude, location.altitude),
+                    accuracyMeters = location.accuracy,
+                    headingDegrees = heading ?: 0f,
+                    hasHeading = heading != null,
+                    stable = false,
+                ),
+                android.os.SystemClock.elapsedRealtime(),
             )
         }
     }

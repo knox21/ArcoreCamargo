@@ -155,9 +155,14 @@ fun featureEdges(mesh: LocalMesh): List<Int> {
  * whenever you walk a few metres, so the result is worked out once and kept.
  */
 class MeshEdgeCache(private val meshes: List<LocalMesh>) {
-    private var cached: List<List<Int>>? = null
+    private var cachedEdges: List<List<Int>>? = null
+    private var cachedShading: List<MeshShading>? = null
 
-    fun edges(): List<List<Int>> = cached ?: meshes.map(::featureEdges).also { cached = it }
+    fun edges(): List<List<Int>> =
+        cachedEdges ?: meshes.map(::featureEdges).also { cachedEdges = it }
+
+    fun shading(): List<MeshShading> =
+        cachedShading ?: meshes.map(::shadingOf).also { cachedShading = it }
 }
 
 /**

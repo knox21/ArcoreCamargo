@@ -36,6 +36,6 @@ fun ARSceneView.applyFixedLighting() {
         .build(engine)
     mainLightNode?.apply {
         intensity = MAIN_LIGHT_INTENSITY
-        lightDirection = Float3(0.35f, -1f, -0.45f)
+        lightDirection = Float3(0.55f, -0.72f, -0.42f)
     }
 }

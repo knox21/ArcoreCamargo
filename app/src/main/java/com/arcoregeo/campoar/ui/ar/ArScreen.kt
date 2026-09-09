@@ -191,7 +191,9 @@ fun ArScreen(
     var showMarkers by remember {
         mutableStateOf(document.polygons.isEmpty() && document.localMeshes.isEmpty())
     }
-    var showEdges by remember { mutableStateOf(false) }
+    var showEdges by remember {
+        mutableStateOf(document.localMeshes.isNotEmpty())
+    }
     var sceneView by remember { mutableStateOf<ARSceneView?>(null) }
     var calibPanelOpen by remember { mutableStateOf(false) }
     var fixHint by remember { mutableStateOf<String?>(null) }
@@ -367,6 +369,21 @@ fun ArScreen(
                     placementHint?.let { hint ->
                         Text(
                             hint,
+                            color = Color(0xFFBFDBFE),
+                            fontSize = 11.sp,
+                            lineHeight = 14.sp,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .background(Color(0xCC1E3A8A), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                    val gpsWarmup = pose != null && !pose.stable && placement == Placement.None &&
+                        calibMode == CalibMode.Idle
+                    if (gpsWarmup) {
+                        Text(
+                            "Estabilizando GPS · se promedian las primeras lecturas " +
+                                "para que el sólido no salte",
                             color = Color(0xFFBFDBFE),
                             fontSize = 11.sp,
                             lineHeight = 14.sp,
@@ -632,6 +649,7 @@ private fun ArWorldScene(
     var childNodes by remember { mutableStateOf(emptyList<Node>()) }
     var youNode by remember { mutableStateOf<CubeNode?>(null) }
     var sceneViewRef by remember { mutableStateOf<ARSceneView?>(null) }
+    var retainedMesh by remember { mutableStateOf<List<Node>>(emptyList()) }
 
     var activeAnchor by remember { mutableStateOf<Anchor?>(null) }
     var activeCalib by remember { mutableStateOf<ReferenceCalibration?>(null) }
@@ -677,6 +695,35 @@ private fun ArWorldScene(
         }
     }
 
+    val meshPlaceable = document.localMeshes.isNotEmpty() &&
+        (document.meshOrigin != null || document.polygons.isEmpty())
+
+    // Geometry is built once per document/style. Rebuilding it on every GPS re-anchor
+    // is what closed the camera when edges or lighting were added.
+    LaunchedEffect(document.id, showSolid, showEdges, meshPlaceable) {
+        retainedMesh.forEach { node ->
+            runCatching { node.parent?.removeChildNode(node) }
+            runCatching { node.destroy() }
+        }
+        retainedMesh = emptyList()
+        if (!showSolid || !meshPlaceable) return@LaunchedEffect
+        val look = withContext(Dispatchers.Default) {
+            Pair(
+                if (showEdges) edgeCache.edges() else null,
+                edgeCache.shading(),
+            )
+        }
+        retainedMesh = runCatching {
+            buildMeshNodes(
+                engine = engine,
+                materials = solidMaterials,
+                meshes = document.localMeshes,
+                outlines = look.first,
+                looks = look.second,
+            )
+        }.getOrDefault(emptyList())
+    }
+
     LaunchedEffect(
         activeAnchor,
         activeCalib,
@@ -686,10 +733,14 @@ private fun ArWorldScene(
         showMarkers,
         showEdges,
         heightOffsetM,
+        retainedMesh,
     ) {
         val anchor = activeAnchor
         val calib = activeCalib
         val previousRoot = childNodes.firstOrNull()
+        retainedMesh.forEach { node ->
+            runCatching { node.parent?.removeChildNode(node) }
+        }
         if (anchor == null || calib == null) {
             childNodes = emptyList()
             youNode = null
@@ -697,37 +748,20 @@ private fun ArWorldScene(
             onSolidBuilt(0)
             return@LaunchedEffect
         }
-        // Tracing the outline sorts every edge of the building, which is too long to
-        // spend on the thread that has to draw the next camera frame.
-        val outlines = if (showSolid && showEdges) {
-            withContext(Dispatchers.Default) { edgeCache.edges() }
-        } else {
-            null
-        }
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
         if (showSolid) {
-            // Without a mesh origin the model can only be drawn on the anchor, i.e. on
-            // top of you in GPS mode. The georeferenced footprints are used instead.
-            val meshPlaceable = document.localMeshes.isNotEmpty() &&
-                (document.meshOrigin != null || document.polygons.isEmpty())
-            if (meshPlaceable) {
-                // Show the real IFC model, same geometry as the 3D viewer.
-                val meshNodes = runCatching {
-                    buildMeshNodes(
-                        engine = engine,
-                        materials = solidMaterials,
-                        meshes = document.localMeshes,
-                        calibration = calib,
-                        meshOrigin = document.meshOrigin,
-                        rotationDeg = document.meshRotationDeg,
-                        heightOffsetMeters = heightOffsetM,
-                        outlines = outlines,
-                    )
-                }.getOrDefault(emptyList())
-                parts += meshNodes.size
-                meshNodes.forEach { root.addChildNode(it) }
-            } else {
+            if (meshPlaceable && retainedMesh.isNotEmpty()) {
+                relocateMeshNodes(
+                    nodes = retainedMesh,
+                    calibration = calib,
+                    meshOrigin = document.meshOrigin,
+                    rotationDeg = document.meshRotationDeg,
+                    heightOffsetMeters = heightOffsetM,
+                )
+                retainedMesh.forEach { root.addChildNode(it) }
+                parts += retainedMesh.size
+            } else if (!meshPlaceable) {
                 val rings = document.polygons.take(MAX_AR_SOLIDS)
                 val detailed = rings.size <= DETAILED_SOLID_LIMIT
                 rings.forEach { polygon ->
@@ -763,10 +797,6 @@ private fun ArWorldScene(
                 )
             }
         }
-        // Green "TÚ" marker at the real GPS position relative to the solid frame.
-        // In GPS mode (origin = phone) this sits at the camera; in Geospatial/Manual
-        // it sits wherever GPS says you are vs the plot — so you can see if you're
-        // outside the solid instead of assuming the center point is you.
         val marker = CubeNode(
             engine = engine,
             size = Size(0.45f, 2.0f, 0.45f),
@@ -973,6 +1003,10 @@ private fun ArWorldScene(
 
             // GPS + compass: solid stays at its real lat/lon relative to YOUR GPS.
             if (cameraReady && devicePose != null && devicePose.hasHeading) {
+                if (!devicePose.stable && livePlacement != Placement.Gps) {
+                    // Wait for the averaged fix so the first pin is not a flying sample.
+                    return@ARScene
+                }
                 val camPose = camera.pose
                 val forward = camPose.zAxis
                 val forwardAngle = Math.toDegrees(

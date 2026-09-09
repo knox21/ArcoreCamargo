@@ -25,22 +25,33 @@ import kotlin.math.sqrt
 private val WALL_COLOR = Float4(0.98f, 0.62f, 0.22f, 1f)
 private val TOP_COLOR = Float4(1f, 0.90f, 0.40f, 1f)
 private val BOTTOM_COLOR = Float4(0.45f, 0.78f, 1f, 1f)
-private val OUTLINE_COLOR = Float4(0.12f, 0.12f, 0.14f, 1f)
+private val OUTLINE_COLOR = Float4(0.07f, 0.08f, 0.10f, 1f)
 
 /**
  * Material instances shared by every solid of a document. They live as long as the
  * [MaterialLoader], so creating one set per rebuild would leak the previous ones.
  */
 class ArSolidMaterials(loader: MaterialLoader) {
-    val wall: MaterialInstance = loader.createArVisibleColor(WALL_COLOR)
-    val top: MaterialInstance = loader.createArVisibleColor(TOP_COLOR)
-    val bottom: MaterialInstance = loader.createArVisibleColor(BOTTOM_COLOR)
+    val wall: MaterialInstance = loader.createArShadedColor(WALL_COLOR)
+    val top: MaterialInstance = loader.createArShadedColor(TOP_COLOR)
+    val bottom: MaterialInstance = loader.createArShadedColor(BOTTOM_COLOR)
     val edgeTop: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#FDE047"))
     val edgeBottom: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
     val post: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#F8FAFC"))
     val marker: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
     val you: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#34D399"))
     val outline: MaterialInstance = loader.createArVisibleColor(OUTLINE_COLOR)
+}
+
+/** Lit colour so walls, roofs and floors read as different faces under the AR light. */
+fun MaterialLoader.createArShadedColor(color: Float4): MaterialInstance {
+    val boosted = Float4(
+        (color.x * 1.08f).coerceAtMost(1f),
+        (color.y * 1.08f).coerceAtMost(1f),
+        (color.z * 1.08f).coerceAtMost(1f),
+        1f,
+    )
+    return createColorInstance(boosted, metallic = 0.04f, roughness = 0.42f, reflectance = 0.22f)
 }
 
 /**
@@ -138,67 +149,61 @@ fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
  * viewer instead of a box around the footprint.
  *
  * Mesh coordinates are metres in the model local frame (Y up, Z = −north before
- * rotation). [meshOrigin] is where that frame's origin sits on Earth and
- * [rotationDeg] turns its axes onto true north.
+ * rotation). Call [relocateMeshNodes] to sit that frame on Earth; the geometry is
+ * built once so a GPS re-anchor does not rebuild Filament buffers.
  *
- * Passing [outlines] — one list of index pairs per mesh — draws the model with its
- * faces told apart by colour and a triangle ribbon over each edge. The camera opens
- * without that overlay: tracing edges and asking Filament for LINES is what took
- * the process down as soon as the session started.
+ * Passing [outlines] draws a triangle ribbon over each crease. Faces are always
+ * split into walls / slabs with outward normals — averaging both windings of each
+ * triangle cancelled the lighting and the solid read as a flat block.
  */
 fun buildMeshNodes(
     engine: Engine,
     materials: ArSolidMaterials,
     meshes: List<LocalMesh>,
-    calibration: ReferenceCalibration,
-    meshOrigin: LatLngAlt?,
-    rotationDeg: Float,
-    heightOffsetMeters: Float = 0f,
     outlines: List<List<Int>>? = null,
+    looks: List<MeshShading>? = null,
 ): List<Node> {
     if (meshes.isEmpty()) return emptyList()
-
-    val offset = meshOrigin?.let { calibration.enuOf(it) }
-    val east = offset?.east?.toFloat() ?: 0f
-    val north = offset?.north?.toFloat() ?: 0f
-    val up = (offset?.up?.toFloat() ?: 0f) + heightOffsetMeters
-    val place = Position(east, up, -north)
-    val turn = Position(0f, rotationDeg, 0f)
-
-    val palette = listOf(materials.wall, materials.top, materials.bottom)
     val nodes = mutableListOf<Node>()
     meshes.forEachIndexed { index, mesh ->
-        if (outlines == null) {
-            val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size])
-                ?: return@forEachIndexed
-            nodes += GeometryNode(engine, geometry, palette[index % palette.size]) {
-                culling(false)
-            }.stand(place, turn)
-            return@forEachIndexed
-        }
-        val shading = runCatching { shadingOf(mesh) }.getOrNull()
+        val shading = looks?.getOrNull(index) ?: runCatching { shadingOf(mesh) }.getOrNull()
         if (shading != null) {
             listOf(
                 shading.walls to materials.wall,
                 shading.tops to materials.top,
                 shading.bottoms to materials.bottom,
             ).forEach { (indices, material) ->
-                meshGeometry(engine, mesh, shading, indices, material)?.let {
-                    nodes += it.stand(place, turn)
-                }
+                meshGeometry(engine, mesh, shading, indices, material)?.let { nodes += it }
             }
         } else {
             val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size])
-            if (geometry != null) {
-                nodes += GeometryNode(engine, geometry, palette[index % palette.size]) {
-                    culling(false)
-                }.stand(place, turn)
+                ?: return@forEachIndexed
+            nodes += GeometryNode(engine, geometry, materials.wall) {
+                culling(false)
             }
         }
-        ribbonNode(engine, materials.outline, mesh, outlines.getOrNull(index).orEmpty())
-            ?.let { nodes += it.stand(place, turn) }
+        if (outlines != null) {
+            ribbonNode(engine, materials.outline, mesh, outlines.getOrNull(index).orEmpty())
+                ?.let { nodes += it }
+        }
     }
     return nodes
+}
+
+fun relocateMeshNodes(
+    nodes: List<Node>,
+    calibration: ReferenceCalibration,
+    meshOrigin: LatLngAlt?,
+    rotationDeg: Float,
+    heightOffsetMeters: Float = 0f,
+) {
+    val offset = meshOrigin?.let { calibration.enuOf(it) }
+    val east = offset?.east?.toFloat() ?: 0f
+    val north = offset?.north?.toFloat() ?: 0f
+    val up = (offset?.up?.toFloat() ?: 0f) + heightOffsetMeters
+    val place = Position(east, up, -north)
+    val turn = Position(0f, rotationDeg, 0f)
+    nodes.forEach { it.stand(place, turn) }
 }
 
 private val MESH_COLORS = listOf(
@@ -308,7 +313,7 @@ private fun ribbonWidthOf(mesh: LocalMesh): Float {
         if (v.z > maxZ) maxZ = v.z
     }
     val span = maxOf(maxX - minX, maxY - minY, maxZ - minZ)
-    return if (span.isFinite() && span > 0f) (span * 0.004f).coerceIn(0.02f, 0.12f) else 0.04f
+    return if (span.isFinite() && span > 0f) (span * 0.009f).coerceIn(0.05f, 0.22f) else 0.06f
 }
 
 private fun buildWallGeometry(
