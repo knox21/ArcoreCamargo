@@ -15,17 +15,17 @@ class MiniMapTest {
     private val you = LatLngAlt(-16.4205, -71.5284)
 
     @Test
-    fun `heading up puts north above you when the phone faces north`() {
-        val (x, y) = headingUp(east = 0.0, north = 10.0, headingDeg = 0f)
-        assertEquals(0.0, x, 1e-9)
-        assertEquals(10.0, y, 1e-9)
+    fun `north stays up on the canvas regardless of heading`() {
+        val at = miniMapCanvas(east = 0.0, north = 10.0, centerX = 50f, centerY = 50f, pixelsPerMetre = 1f)
+        assertEquals(50f, at.x, 1e-4f)
+        assertEquals(40f, at.y, 1e-4f)
     }
 
     @Test
-    fun `heading up puts east above you when the phone faces east`() {
-        val (x, y) = headingUp(east = 10.0, north = 0.0, headingDeg = 90f)
-        assertEquals(0.0, x, 1e-6)
-        assertEquals(10.0, y, 1e-6)
+    fun `east is to the right of the standing GPS fix`() {
+        val at = miniMapCanvas(east = 10.0, north = 0.0, centerX = 50f, centerY = 50f, pixelsPerMetre = 1f)
+        assertEquals(60f, at.x, 1e-4f)
+        assertEquals(50f, at.y, 1e-4f)
     }
 
     @Test
@@ -53,11 +53,12 @@ class MiniMapTest {
                 ),
             ),
         )
-        val sketch = miniMapSketch(document, you, headingDeg = 0f)
+        val sketch = miniMapSketch(document, you, headingDeg = 90f)
         assertEquals(1, sketch.points.size)
         assertTrue(sketch.points[0].east > 30.0)
         assertEquals(0.0, sketch.points[0].north, 1.0)
         assertEquals(1, sketch.lines.size)
         assertEquals(1, sketch.rings.size)
+        assertEquals(90f, sketch.headingDeg)
     }
 }

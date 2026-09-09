@@ -16,6 +16,9 @@ import kotlin.math.sin
  */
 internal const val FAR_VIEW_TRIGGER_M = 100.0
 
+/** Past this, Acercar is on by default so a kilometre-away plot is not a speck. */
+internal const val ACERCAR_DEFAULT_M = 1_000.0
+
 /** Leaving needs a shorter distance than entering, so GPS noise cannot flap the view. */
 internal const val FAR_VIEW_EXIT_M = 80.0
 
@@ -136,3 +139,15 @@ internal fun solidExtentOf(document: KmzDocument, fallback: LatLngAlt?): SolidEx
     )
     return SolidExtent(centroid, half.toFloat().coerceAtLeast(5f))
 }
+
+/** Compass heading minus the camera's looking bearing in the AR session XZ plane. */
+internal fun sessionYawDegrees(
+    headingDegrees: Double,
+    cameraZAxisX: Double,
+    cameraZAxisZ: Double,
+): Double {
+    val forwardAngle = Math.toDegrees(atan2(-cameraZAxisX, cameraZAxisZ))
+    return headingDegrees - forwardAngle
+}
+
+internal fun shouldAcercarByDefault(distanceM: Double): Boolean = distanceM > ACERCAR_DEFAULT_M

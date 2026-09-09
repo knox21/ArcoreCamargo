@@ -40,6 +40,13 @@ class GeoMathEnuTest {
     }
 
     @Test
+    fun `a KML height of zero is not sea level under a GPS fix`() {
+        val kml = LatLngAlt(arequipa.latitude, arequipa.longitude, altitude = 0.0)
+        assertEquals(0.0, GeoMath.toEnu(arequipa, kml).up, 1e-9)
+        assertEquals(0.0, GeoMath.toEnu(kml, arequipa).up, 1e-9)
+    }
+
+    @Test
     fun `a 90 degree yaw turns east into north`() {
         val (east, north) = GeoMath.rotateYaw(10.0, 0.0, 90.0)
         assertEquals(0.0, east, 1e-9)

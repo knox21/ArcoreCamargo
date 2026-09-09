@@ -247,4 +247,18 @@ class FarViewPlacementTest {
             farViewPlan(centroid, viewer, 15f, wasFarAway = false, forceCloseUp = true).farAway,
         )
     }
+
+    @Test
+    fun `a kilometre away turns Acercar on by default`() {
+        assertFalse(shouldAcercarByDefault(400.0))
+        assertTrue(shouldAcercarByDefault(1_200.0))
+    }
+
+    @Test
+    fun `session yaw is zero when the camera already looks the compass heading`() {
+        // Camera looking along -Z, so its +Z axis is +Z.
+        assertEquals(0.0, sessionYawDegrees(0.0, cameraZAxisX = 0.0, cameraZAxisZ = 1.0), 1e-6)
+        // Camera looking +X (east in a north-aligned session): +Z_cam maps to -X.
+        assertEquals(0.0, sessionYawDegrees(90.0, cameraZAxisX = -1.0, cameraZAxisZ = 0.0), 1e-6)
+    }
 }

@@ -37,7 +37,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -170,10 +169,10 @@ fun ArScreen(
     state: CampoUiState,
     onBack: () -> Unit,
     onStartLocation: () -> Unit,
-    onStopLocation: () -> Unit,
     onSelectPoint: (String) -> Unit,
     onGeospatialStatus: (Boolean, Double?, String?) -> Unit,
     onCalibrationChanged: (Int) -> Unit,
+    onSetGpsLocked: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     var permissionGranted by remember { mutableStateOf(hasArPermissions(context)) }
@@ -191,8 +190,9 @@ fun ArScreen(
     var ref1Geo by remember { mutableStateOf<LatLngAlt?>(null) }
     var ref1World by remember { mutableStateOf<FloatArray?>(null) }
     var showSolid by remember { mutableStateOf(true) }
-    var showMiniMap by remember { mutableStateOf(false) }
+    var showMiniMap by remember { mutableStateOf(true) }
     var forceCloseUp by remember { mutableStateOf(false) }
+    var acercarTouched by remember { mutableStateOf(false) }
     var showMarkers by remember {
         mutableStateOf(document.polygons.isEmpty() && document.localMeshes.isEmpty())
     }
@@ -208,7 +208,6 @@ fun ArScreen(
     var resumeGpsTick by remember { mutableStateOf(0) }
     var acercarTick by remember { mutableStateOf(0) }
     var solidParts by remember { mutableStateOf(0) }
-    var gpsLocked by remember { mutableStateOf(false) }
     var heightOffsetM by remember { mutableStateOf(0f) }
     var yawOffsetDeg by remember { mutableStateOf(0f) }
     var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
@@ -233,17 +232,25 @@ fun ArScreen(
     LaunchedEffect(calibration) {
         onCalibrationChanged(calibration?.refCount ?: 0)
     }
-    DisposableEffect(Unit) {
-        onDispose { onStopLocation() }
-    }
 
     val selected = targets.firstOrNull { it.id == state.selectedPointId } ?: targets.firstOrNull()
     val pose = state.pose
+    val gpsLocked = state.gpsLocked
     val solidExtent = remember(document.id, targets) {
         solidExtentOf(document, targets.firstOrNull()?.coordinate)
     }
     val solidCentroid = solidExtent.centroid
     val solidHalfExtentM = solidExtent.halfExtentM
+
+    LaunchedEffect(Unit) {
+        showSolid = true
+    }
+    LaunchedEffect(pose?.coordinate, solidCentroid, acercarTouched) {
+        if (acercarTouched) return@LaunchedEffect
+        val here = pose?.coordinate ?: return@LaunchedEffect
+        val there = solidCentroid ?: return@LaunchedEffect
+        forceCloseUp = shouldAcercarByDefault(GeoMath.distanceMeters(here, there))
+    }
 
     fun clearCalibration() {
         rootAnchor?.detach()
@@ -388,18 +395,30 @@ fun ArScreen(
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                     }
-                    val gpsWarmup = pose != null && !pose.stable && placement == Placement.None &&
-                        calibMode == CalibMode.Idle
-                    if (gpsWarmup) {
+                    val gpsWarmup = state.gpsCalibrating ||
+                        (pose != null && !pose.stable && placement == Placement.None &&
+                            calibMode == CalibMode.Idle)
+                    if (gpsWarmup && !gpsLocked) {
                         Text(
-                            "Estabilizando GPS · se promedian las primeras lecturas " +
-                                "para que el sólido no salte",
+                            "Calibrando GPS · quédate parado · se promedian las lecturas " +
+                                "y se ancla este punto",
                             color = Color(0xFFBFDBFE),
                             fontSize = 11.sp,
                             lineHeight = 14.sp,
                             modifier = Modifier
                                 .padding(top = 4.dp)
                                 .background(Color(0xCC1E3A8A), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                    if (gpsLocked && placement != Placement.Local) {
+                        Text(
+                            "GPS anclado · el modelo está en su coordenada, míralo en su rumbo",
+                            color = Color(0xFF86EFAC),
+                            fontSize = 11.sp,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .background(Color(0xCC14532D), RoundedCornerShape(8.dp))
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         )
                     }
@@ -438,15 +457,15 @@ fun ArScreen(
                         onBringHere = {
                             showSolid = true
                             forceCloseUp = false
+                            acercarTouched = true
                             bringHereTick += 1
-                            gpsLocked = false
                             fixHint = "Traer aquí · el sólido queda delante, donde apuntas " +
                                 "(no es su rumbo GPS)"
                         },
                         onAcercar = {
                             showSolid = true
+                            acercarTouched = true
                             forceCloseUp = !forceCloseUp
-                            gpsLocked = false
                             acercarTick += 1
                             if (placement == Placement.Local) resumeGpsTick += 1
                             fixHint = if (forceCloseUp) {
@@ -457,8 +476,8 @@ fun ArScreen(
                             }
                         },
                         onToggleGpsLock = {
-                            gpsLocked = !gpsLocked
-                            fixHint = if (gpsLocked) {
+                            onSetGpsLocked(!gpsLocked)
+                            fixHint = if (!gpsLocked) {
                                 "GPS anclado · el sólido ya no salta con el GPS"
                             } else {
                                 "GPS libre · sigue tu posición y la del modelo"
@@ -466,11 +485,8 @@ fun ArScreen(
                         },
                         onResumeGps = {
                             showSolid = true
-                            forceCloseUp = false
                             resumeGpsTick += 1
-                            gpsLocked = false
-                            fixHint = "GPS real: cerca a escala; a más de 100 m se acerca " +
-                                "manteniendo dirección y orientación"
+                            fixHint = "Rumbo real con el GPS anclado"
                         },
                         onHeightUp = {
                             heightOffsetM = (heightOffsetM + 0.25f).coerceAtMost(8f)
@@ -753,14 +769,15 @@ private fun ArWorldScene(
         (document.meshOrigin != null || document.polygons.isEmpty())
 
     // Geometry is built once per document. Edges are only shown or hidden — rebuilding
-    // the solid on that button is what made the camera hitch.
-    LaunchedEffect(document.id, showSolid, meshPlaceable) {
+    // the solid on that button is what made the camera hitch. Building even while
+    // hidden means Sólido ON does not have to reconstruct the mesh to appear.
+    LaunchedEffect(document.id, meshPlaceable) {
         retainedMesh?.all?.forEach { node ->
             runCatching { node.parent?.removeChildNode(node) }
             runCatching { node.destroy() }
         }
         retainedMesh = null
-        if (!showSolid || !meshPlaceable) return@LaunchedEffect
+        if (!meshPlaceable) return@LaunchedEffect
         val look = withContext(Dispatchers.Default) {
             Pair(edgeCache.edges(), edgeCache.shading())
         }
@@ -819,8 +836,11 @@ private fun ArWorldScene(
                     heightOffsetMeters = heightOffsetM,
                     yawOffsetDeg = yawOffsetDeg,
                 )
-                mesh.all.forEach { root.addChildNode(it) }
-                parts += mesh.all.size
+                mesh.all.forEach { node ->
+                    node.isVisible = showSolid
+                    root.addChildNode(node)
+                }
+                if (showSolid) parts += mesh.all.size
             } else if (kmlDocument) {
                 val overlay = buildKmlOverlayNodes(
                     engine = engine,
@@ -1028,108 +1048,54 @@ private fun ArWorldScene(
                 if (cameraReady && placement != Placement.Local) placeInFront()
                 return@ARScene
             }
-            // Frozen GPS pose: do not chase new fixes (stops the solid from jumping).
+            // Frozen GPS: do not chase new fixes once the standing point is pinned.
             if (liveGpsLocked && livePlacement == Placement.Gps) return@ARScene
 
-            // Where you are, as well as we can tell: the Earth pose beats the raw fix.
-            val viewerGeo = if (tracking && geoPose != null) {
-                LatLngAlt(geoPose.latitude, geoPose.longitude)
-            } else {
-                devicePose?.coordinate
+            if (devicePose == null || !devicePose.hasHeading) return@ARScene
+
+            // Wait until the standing average is ready, unless it is already locked.
+            if (!devicePose.stable && !liveGpsLocked && livePlacement != Placement.Gps) {
+                return@ARScene
             }
-            // Past a hundred metres the model is a couple of pixels tall and GPS noise
-            // is bigger than the model, so it is drawn closer along the line that joins
-            // you to it. That keeps the bearing you look at and its own orientation.
+
+            val viewerGeo = LatLngAlt(devicePose.coordinate.latitude, devicePose.coordinate.longitude)
+            val distanceM = centroid?.let { GeoMath.distanceMeters(viewerGeo, it) } ?: 0.0
             val plan = farViewPlan(
                 centroid = centroid,
                 viewer = viewerGeo,
                 halfExtentM = liveHalfExtent,
                 wasFarAway = lastPlacement.farAway,
-                forceCloseUp = liveForceCloseUp,
+                forceCloseUp = liveForceCloseUp || shouldAcercarByDefault(distanceM),
             )
 
-            // Geospatial only when we actually have a usable Earth pose. Never
-            // block the GPS fallback if createAnchor fails.
-            val geospatialOk = tracking &&
-                centroid != null &&
-                geoAccuracy != null &&
-                geoAccuracy <= 25.0 &&
-                !liveGpsLocked
-            if (geospatialOk) {
-                // An Earth anchor stands for its own place on the globe, so pulling a
-                // far model in means anchoring next to you and measuring the model from
-                // the standoff origin. Anchoring the origin itself would leave the
-                // model exactly where it really is, invisibly far away.
-                val anchorGeo = plan.standoff?.viewerGeo ?: centroid
-                val originGeo = plan.standoff?.originGeo ?: centroid
-                val stale = livePlacement != Placement.Geospatial ||
-                    lastPlacement.earthMoved(anchorGeo, plan.farAway)
-                farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
-                if (!stale) return@ARScene
+            if (!cameraReady) return@ARScene
 
-                // Anchors sit on the ground, an eye height below the phone.
-                val altitude = (geoPose?.altitude ?: 0.0) - EYE_HEIGHT_M
-                val anchor = runCatching {
-                    earth.createAnchor(
-                        anchorGeo.latitude,
-                        anchorGeo.longitude,
-                        altitude,
-                        0f, 0f, 0f, 1f,
-                    )
-                }.getOrNull()
-                if (anchor != null) {
-                    lastPlacement.rememberEarth(anchorGeo, plan.farAway)
-                    replaceAnchor(
-                        anchor,
-                        ReferenceCalibration(originGeo = originGeo, yawDegrees = 0.0, refCount = 0),
-                        Placement.Geospatial,
-                    )
-                    return@ARScene
-                }
-            }
-            if (livePlacement == Placement.Geospatial) {
-                // Earth stopped tracking: keep the anchored model instead of jumping
-                // it into the GPS frame, which is the less accurate of the two.
-                return@ARScene
-            }
+            val camPose = camera.pose
+            val forward = camPose.zAxis
+            val yaw = sessionYawDegrees(
+                headingDegrees = devicePose.headingDegrees.toDouble(),
+                cameraZAxisX = forward[0].toDouble(),
+                cameraZAxisZ = forward[2].toDouble(),
+            )
+            val originGeo = plan.standoff?.originGeo ?: viewerGeo
+            farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
 
-            // GPS + compass: solid stays at its real lat/lon relative to YOUR GPS.
-            if (cameraReady && devicePose != null && devicePose.hasHeading) {
-                if (!devicePose.stable && livePlacement != Placement.Gps) {
-                    // Wait for the averaged fix so the first pin is not a flying sample.
-                    return@ARScene
-                }
-                val camPose = camera.pose
-                val forward = camPose.zAxis
-                val forwardAngle = Math.toDegrees(
-                    atan2(-forward[0].toDouble(), forward[2].toDouble()),
+            val stale = livePlacement != Placement.Gps ||
+                lastPlacement.gpsMoved(devicePose.coordinate, yaw, plan.farAway)
+            if (!stale) return@ARScene
+
+            val groundPose = Pose.makeTranslation(
+                camPose.tx(),
+                camPose.ty() - EYE_HEIGHT_M,
+                camPose.tz(),
+            )
+            runCatching { session.createAnchor(groundPose) }.getOrNull()?.let { anchor ->
+                lastPlacement.rememberGps(devicePose.coordinate, yaw, plan.farAway)
+                replaceAnchor(
+                    anchor,
+                    ReferenceCalibration(originGeo = originGeo, yawDegrees = yaw, refCount = 0),
+                    Placement.Gps,
                 )
-                val yaw = devicePose.headingDegrees - forwardAngle
-                val originGeo = plan.standoff?.originGeo ?: devicePose.coordinate
-                farViewDistanceM = if (plan.farAway) plan.roundedDistanceM else null
-
-                val stale = livePlacement != Placement.Gps ||
-                    lastPlacement.gpsMoved(devicePose.coordinate, yaw, plan.farAway)
-                if (!stale) return@ARScene
-
-                // The anchor is the world point that stands for the origin, so the two
-                // are always renewed together: keeping the old anchor while moving the
-                // origin counts your walk twice and slides the model away from you.
-                // Between renewals ARCore tracking is what holds the model in place,
-                // and it is far steadier than the GPS fix.
-                val groundPose = Pose.makeTranslation(
-                    camPose.tx(),
-                    camPose.ty() - EYE_HEIGHT_M,
-                    camPose.tz(),
-                )
-                runCatching { session.createAnchor(groundPose) }.getOrNull()?.let { anchor ->
-                    lastPlacement.rememberGps(devicePose.coordinate, yaw, plan.farAway)
-                    replaceAnchor(
-                        anchor,
-                        ReferenceCalibration(originGeo = originGeo, yawDegrees = yaw, refCount = 0),
-                        Placement.Gps,
-                    )
-                }
             }
         },
     )

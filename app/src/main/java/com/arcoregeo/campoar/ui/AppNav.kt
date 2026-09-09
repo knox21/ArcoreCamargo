@@ -63,7 +63,12 @@ fun CampoArRoot(viewModel: CampoViewModel) {
                         document = document,
                         downloadProgress = state.downloadProgress,
                         myPose = state.pose,
-                        onBack = { navController.popBackStack() },
+                        gpsCalibrating = state.gpsCalibrating,
+                        gpsLocked = state.gpsLocked,
+                        onBack = {
+                            viewModel.stopLocation()
+                            navController.popBackStack()
+                        },
                         onDownloadOffline = viewModel::downloadOfflineMap,
                         onOpenAr = { navController.navigate("ar/${document.id}") },
                         onSelectPoint = viewModel::selectPoint,
@@ -96,10 +101,10 @@ fun CampoArRoot(viewModel: CampoViewModel) {
                         state = state,
                         onBack = { navController.popBackStack() },
                         onStartLocation = viewModel::startLocation,
-                        onStopLocation = viewModel::stopLocation,
                         onSelectPoint = viewModel::selectPoint,
                         onGeospatialStatus = viewModel::setGeospatialStatus,
                         onCalibrationChanged = viewModel::setCalibrationRefCount,
+                        onSetGpsLocked = viewModel::setGpsLocked,
                     )
                 }
             }

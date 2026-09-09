@@ -14,9 +14,9 @@ import kotlin.math.sin
  * claimed to be; a lone outlier is ignored until a second one agrees.
  */
 class PoseSmoother(
-    private val windowMs: Long = 4_000L,
-    private val minSamples: Int = 4,
-    private val settleMs: Long = 1_200L,
+    private val windowMs: Long = 8_000L,
+    private val minSamples: Int = 6,
+    private val settleMs: Long = 3_500L,
     private val clusterMeters: Double = 18.0,
 ) {
     private val samples = ArrayDeque<Fix>()

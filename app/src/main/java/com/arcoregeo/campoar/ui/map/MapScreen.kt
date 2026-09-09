@@ -76,6 +76,8 @@ fun MapScreen(
     document: KmzDocument,
     downloadProgress: Int?,
     myPose: DevicePose?,
+    gpsCalibrating: Boolean,
+    gpsLocked: Boolean,
     onBack: () -> Unit,
     onDownloadOffline: (Float) -> Unit,
     onOpenAr: () -> Unit,
@@ -377,6 +379,25 @@ fun MapScreen(
                         modifier = Modifier.padding(bottom = 6.dp),
                     )
                 }
+                Text(
+                    text = when {
+                        gpsLocked ->
+                            "GPS anclado · quédate en este punto · la cámara respeta el rumbo real"
+                        gpsCalibrating ->
+                            "Calibrando GPS · quédate parado, se promedian las lecturas y se ancla"
+                        myPose == null ->
+                            "Buscando GPS…"
+                        else ->
+                            "GPS ±${myPose.accuracyMeters.toInt()} m"
+                    },
+                    color = if (gpsLocked) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
                 if (downloadProgress != null) {
                     Text("Descargando mapa: $downloadProgress%")
                     LinearProgressIndicator(

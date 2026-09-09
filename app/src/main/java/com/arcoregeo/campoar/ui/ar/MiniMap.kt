@@ -14,6 +14,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -22,9 +23,7 @@ import com.arcoregeo.campoar.data.LatLngAlt
 import com.arcoregeo.campoar.data.openRing
 import com.arcoregeo.campoar.geo.DevicePose
 import com.arcoregeo.campoar.geo.GeoMath
-import kotlin.math.cos
 import kotlin.math.hypot
-import kotlin.math.sin
 
 internal data class MiniMapDot(val east: Double, val north: Double)
 
@@ -39,8 +38,8 @@ internal data class MiniMapSketch(
 }
 
 /**
- * Ground plan of the KMZ/KML relative to the GPS fix. The canvas then turns it
- * heading-up so the wedge is always "where the phone is looking".
+ * Ground plan relative to the standing GPS fix. North stays up so a georeferenced
+ * model does not spin when the compass jitters; only the you-wedge turns.
  */
 internal fun miniMapSketch(document: KmzDocument, viewer: LatLngAlt, headingDeg: Float): MiniMapSketch {
     fun at(coord: LatLngAlt): MiniMapDot {
@@ -55,14 +54,6 @@ internal fun miniMapSketch(document: KmzDocument, viewer: LatLngAlt, headingDeg:
     )
 }
 
-/** Rotate ENU so [headingDeg] (compass) points "up" on the map. */
-internal fun headingUp(east: Double, north: Double, headingDeg: Float): Pair<Double, Double> {
-    val h = Math.toRadians(headingDeg.toDouble())
-    val c = cos(h)
-    val s = sin(h)
-    return east * c - north * s to east * s + north * c
-}
-
 internal fun miniMapPixelsPerMetre(dots: List<MiniMapDot>, sizePx: Float, padPx: Float): Float {
     val reach = dots.maxOfOrNull { hypot(it.east, it.north) }?.coerceAtLeast(8.0) ?: 8.0
     val usable = (sizePx / 2f - padPx).coerceAtLeast(8f)
@@ -72,17 +63,13 @@ internal fun miniMapPixelsPerMetre(dots: List<MiniMapDot>, sizePx: Float, padPx:
 internal fun miniMapCanvas(
     east: Double,
     north: Double,
-    headingDeg: Float,
     centerX: Float,
     centerY: Float,
     pixelsPerMetre: Float,
-): Offset {
-    val (x, y) = headingUp(east, north, headingDeg)
-    return Offset(
-        centerX + (x * pixelsPerMetre).toFloat(),
-        centerY - (y * pixelsPerMetre).toFloat(),
-    )
-}
+): Offset = Offset(
+    centerX + (east * pixelsPerMetre).toFloat(),
+    centerY - (north * pixelsPerMetre).toFloat(),
+)
 
 @Composable
 internal fun ArMiniMap(
@@ -104,9 +91,7 @@ internal fun ArMiniMap(
             drawCircle(Color(0x661E293B), radius = size.minDimension / 2f)
             drawCircle(Color(0xFF64748B), radius = size.minDimension / 2f, style = Stroke(2f))
 
-            fun pt(dot: MiniMapDot) = miniMapCanvas(
-                dot.east, dot.north, sketch.headingDeg, cx, cy, scale,
-            )
+            fun pt(dot: MiniMapDot) = miniMapCanvas(dot.east, dot.north, cx, cy, scale)
 
             sketch.rings.forEach { ring ->
                 if (ring.size < 2) return@forEach
@@ -132,16 +117,17 @@ internal fun ArMiniMap(
                 lineTo(cx - 9f, cy + 10f)
                 close()
             }
-            drawPath(you, Color(0xFF34D399))
-
-            val (nx, ny) = headingUp(0.0, 1.0, sketch.headingDeg)
-            val rim = size.minDimension / 2f - 10f
-            drawCircle(
-                Color(0xFFFDE68A),
-                radius = 5f,
-                center = Offset(cx + (nx * rim).toFloat(), cy - (ny * rim).toFloat()),
-            )
+            rotate(degrees = sketch.headingDeg, pivot = Offset(cx, cy)) {
+                drawPath(you, Color(0xFF34D399))
+            }
         }
+        Text(
+            "N",
+            color = Color(0xFFFDE68A),
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
         Text(
             "TÚ",
             color = Color(0xFF86EFAC),

@@ -55,6 +55,7 @@ data class ReferenceCalibration(
 
 object GeoMath {
     private const val EARTH_RADIUS_M = 6_378_137.0
+    private const val MAX_VERTICAL_M = 80.0
 
     fun distanceMeters(from: LatLngAlt, to: LatLngAlt): Double {
         val dLat = Math.toRadians(to.latitude - from.latitude)
@@ -119,15 +120,27 @@ object GeoMath {
         val dLon = Math.toRadians(point.longitude - origin.longitude)
         val north = dLat * EARTH_RADIUS_M
         val east = dLon * EARTH_RADIUS_M * cos(latRad)
-        // An unknown altitude is not sea level. IFC and KML models rarely carry one
-        // while the phone always reports its own, and subtracting the two put the
-        // solid a couple of kilometres underground on any site above sea level.
-        val up = if (point.altitude != null && origin.altitude != null) {
-            point.altitude - origin.altitude
-        } else {
-            0.0
-        }
-        return Enu(east = east, north = north, up = up)
+        return Enu(east = east, north = north, up = verticalMeters(origin.altitude, point.altitude))
+    }
+
+    /**
+     * KML writes `0` for "on the ground" and the phone reports its real height. Treating
+     * that 0 as sea level put Arequipa models 2 km under the camera. Placeholder and
+     * missing heights share the AR ground plane; only two close, real altitudes stay.
+     */
+    internal fun verticalMeters(originAltitude: Double?, pointAltitude: Double?): Double {
+        val origin = usableAltitude(originAltitude)
+        val point = usableAltitude(pointAltitude)
+        if (origin == null || point == null) return 0.0
+        val delta = point - origin
+        return if (abs(delta) > MAX_VERTICAL_M) 0.0 else delta
+    }
+
+    private fun usableAltitude(altitude: Double?): Double? {
+        if (altitude == null || !altitude.isFinite()) return null
+        // Google Earth tessellates at 0 when the file has no height.
+        if (abs(altitude) < 0.51) return null
+        return altitude
     }
 
     fun formatDistance(meters: Double): String {

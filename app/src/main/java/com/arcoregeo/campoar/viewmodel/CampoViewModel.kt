@@ -30,6 +30,8 @@ data class CampoUiState(
     val geospatialHorizontalAccuracy: Double? = null,
     val geospatialEarthState: String? = null,
     val calibrationRefCount: Int = 0,
+    val gpsCalibrating: Boolean = false,
+    val gpsLocked: Boolean = false,
 )
 
 class CampoViewModel(application: Application) : AndroidViewModel(application) {
@@ -197,15 +199,56 @@ class CampoViewModel(application: Application) : AndroidViewModel(application) {
         if (!locationRepository.hasFineLocation()) return
         if (locationJob != null) return
         locationJob = viewModelScope.launch {
-            locationRepository.poseFlow().collect { pose ->
-                _state.update { it.copy(pose = pose) }
+            locationRepository.poseFlow().collect { live ->
+                val current = _state.value
+                val frozen = current.pose
+                if (current.gpsLocked && frozen != null) {
+                    _state.update {
+                        it.copy(
+                            pose = frozen.copy(
+                                headingDegrees = live.headingDegrees,
+                                hasHeading = live.hasHeading,
+                                stable = true,
+                            ),
+                            gpsCalibrating = false,
+                            gpsLocked = true,
+                        )
+                    }
+                    return@collect
+                }
+                val lockNow = live.stable
+                _state.update {
+                    it.copy(
+                        pose = live,
+                        gpsCalibrating = !lockNow,
+                        gpsLocked = lockNow,
+                    )
+                }
             }
+        }
+    }
+
+    fun setGpsLocked(locked: Boolean) {
+        val pose = _state.value.pose
+        _state.update {
+            it.copy(
+                gpsLocked = locked,
+                gpsCalibrating = !locked && pose?.stable != true,
+                pose = pose?.copy(stable = if (locked) true else pose.stable),
+            )
         }
     }
 
     fun stopLocation() {
         locationJob?.cancel()
         locationJob = null
+        _state.update {
+            it.copy(
+                pose = null,
+                gpsLocked = false,
+                gpsCalibrating = false,
+            )
+        }
     }
 
     fun setGeospatialStatus(tracking: Boolean, horizontalAccuracy: Double?, earthState: String? = null) {
