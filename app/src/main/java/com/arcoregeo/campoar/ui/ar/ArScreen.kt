@@ -202,6 +202,7 @@ fun ArScreen(
     var solidParts by remember { mutableStateOf(0) }
     var gpsLocked by remember { mutableStateOf(false) }
     var heightOffsetM by remember { mutableStateOf(0f) }
+    var yawOffsetDeg by remember { mutableStateOf(0f) }
     var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
 
     LaunchedEffect(Unit) {
@@ -328,6 +329,7 @@ fun ArScreen(
                     resumeGpsTick = resumeGpsTick,
                     gpsLocked = gpsLocked,
                     heightOffsetM = heightOffsetM,
+                    yawOffsetDeg = yawOffsetDeg,
                     onGeospatialStatus = onGeospatialStatus,
                     onPlacementChanged = { placement = it },
                     onSolidBuilt = { solidParts = it },
@@ -412,6 +414,7 @@ fun ArScreen(
                         showEdges = showEdges,
                         gpsLocked = gpsLocked,
                         heightOffsetM = heightOffsetM,
+                        yawOffsetDeg = yawOffsetDeg,
                         placement = placement,
                         onTogglePanel = {
                             calibPanelOpen = !calibPanelOpen
@@ -448,6 +451,13 @@ fun ArScreen(
                             heightOffsetM = (heightOffsetM - 0.25f).coerceAtLeast(-4f)
                         },
                         onHeightReset = { heightOffsetM = 0f },
+                        onYawLeft = {
+                            yawOffsetDeg = GeoMath.wrapYawDegrees(yawOffsetDeg - 5f)
+                        },
+                        onYawRight = {
+                            yawOffsetDeg = GeoMath.wrapYawDegrees(yawOffsetDeg + 5f)
+                        },
+                        onYawReset = { yawOffsetDeg = 0f },
                         onHideUi = {
                             uiHidden = true
                             calibMode = CalibMode.Idle
@@ -629,6 +639,7 @@ private fun ArWorldScene(
     resumeGpsTick: Int,
     gpsLocked: Boolean,
     heightOffsetM: Float,
+    yawOffsetDeg: Float,
     onGeospatialStatus: (Boolean, Double?, String?) -> Unit,
     onPlacementChanged: (Placement) -> Unit,
     onSolidBuilt: (Int) -> Unit,
@@ -731,6 +742,7 @@ private fun ArWorldScene(
         showSolid,
         showMarkers,
         heightOffsetM,
+        yawOffsetDeg,
         retainedMesh,
     ) {
         val anchor = activeAnchor
@@ -748,6 +760,7 @@ private fun ArWorldScene(
         }
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
+        val kmlDocument = !document.isIfc
         if (showSolid) {
             val mesh = retainedMesh
             if (meshPlaceable && mesh != null && mesh.bodies.isNotEmpty()) {
@@ -757,10 +770,25 @@ private fun ArWorldScene(
                     meshOrigin = document.meshOrigin,
                     rotationDeg = document.meshRotationDeg,
                     heightOffsetMeters = heightOffsetM,
+                    yawOffsetDeg = yawOffsetDeg,
                 )
                 mesh.all.forEach { root.addChildNode(it) }
                 parts += mesh.all.size
-            } else if (!meshPlaceable) {
+            } else if (kmlDocument) {
+                val overlay = buildKmlOverlayNodes(
+                    engine = engine,
+                    materials = solidMaterials,
+                    document = document,
+                    calibration = calib,
+                    heightOffsetMeters = heightOffsetM,
+                    yawOffsetDeg = yawOffsetDeg,
+                    includeFeatures = true,
+                    includeBubbles = true,
+                    bubbleSpanM = solidHalfExtentM,
+                )
+                parts += overlay.size
+                overlay.forEach { root.addChildNode(it) }
+            } else {
                 val rings = document.polygons.take(MAX_AR_SOLIDS)
                 val detailed = rings.size <= DETAILED_SOLID_LIMIT
                 rings.forEach { polygon ->
@@ -777,20 +805,30 @@ private fun ArWorldScene(
                     solid.forEach { root.addChildNode(it) }
                 }
             }
+        } else if (kmlDocument) {
+            val bubbles = buildKmlOverlayNodes(
+                engine = engine,
+                materials = solidMaterials,
+                document = document,
+                calibration = calib,
+                heightOffsetMeters = heightOffsetM,
+                yawOffsetDeg = yawOffsetDeg,
+                includeFeatures = false,
+                includeBubbles = true,
+                bubbleSpanM = solidHalfExtentM,
+            )
+            parts += bubbles.size
+            bubbles.forEach { root.addChildNode(it) }
         }
         onSolidBuilt(parts)
-        if (showMarkers) {
+        if (showMarkers && !kmlDocument) {
             targets.take(MAX_AR_MARKERS).forEach { point ->
-                val enu = calib.enuOf(point.coordinate)
+                val at = enuPosition(point.coordinate, calib, heightOffsetM, yawOffsetDeg)
                 root.addChildNode(
                     CubeNode(
                         engine = engine,
                         size = Size(0.22f, 1.6f, 0.22f),
-                        center = Position(
-                            x = enu.east.toFloat(),
-                            y = 0.8f + enu.up.toFloat(),
-                            z = (-enu.north).toFloat(),
-                        ),
+                        center = Position(at.x, 0.8f + at.y, at.z),
                         materialInstance = solidMaterials.marker,
                     ),
                 )
@@ -1056,6 +1094,7 @@ private fun ControlBar(
     showEdges: Boolean,
     gpsLocked: Boolean,
     heightOffsetM: Float,
+    yawOffsetDeg: Float,
     placement: Placement,
     onTogglePanel: () -> Unit,
     onToggleSolid: () -> Unit,
@@ -1066,6 +1105,9 @@ private fun ControlBar(
     onHeightUp: () -> Unit,
     onHeightDown: () -> Unit,
     onHeightReset: () -> Unit,
+    onYawLeft: () -> Unit,
+    onYawRight: () -> Unit,
+    onYawReset: () -> Unit,
     onHideUi: () -> Unit,
 ) {
     Column(
@@ -1131,6 +1173,18 @@ private fun ControlBar(
             )
             ControlButton("↑", onHeightUp, CONTROL_OFF, modifier = Modifier.width(36.dp))
             ControlButton("0", onHeightReset, CONTROL_OFF, modifier = Modifier.width(36.dp))
+            ControlButton("↶", onYawLeft, CONTROL_OFF, modifier = Modifier.width(36.dp))
+            Text(
+                String.format("%+.0f°", yawOffsetDeg),
+                color = Color(0xFF93C5FD),
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+                modifier = Modifier
+                    .background(Color(0xCC0F172A), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            )
+            ControlButton("↷", onYawRight, CONTROL_OFF, modifier = Modifier.width(36.dp))
+            ControlButton("0°", onYawReset, CONTROL_OFF, modifier = Modifier.width(40.dp))
             ControlButton(if (panelOpen) "Piso…" else "Piso", onTogglePanel, CONTROL_OFF)
             ControlButton(
                 label = if (showEdges) "Aristas ON" else "Ver aristas / colores",

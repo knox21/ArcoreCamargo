@@ -33,4 +33,16 @@ class MeshPlacementTest {
         assertEquals(cos(theta), east, 1e-5)
         assertEquals(sin(theta), north, 1e-5)
     }
+
+    @Test
+    fun `an extra yaw offset keeps turning around the same up axis`() {
+        val extra = 15f
+        val theta = Math.toRadians(extra.toDouble())
+        val matrix = rotation(Quaternion.fromEuler(Float3(0f, extra, 0f)))
+        val alongX = matrix * Float4(1f, 0f, 0f, 1f)
+        val east = alongX.x.toDouble()
+        val north = -alongX.z.toDouble()
+        assertEquals(cos(theta), east, 1e-5)
+        assertEquals(sin(theta), north, 1e-5)
+    }
 }

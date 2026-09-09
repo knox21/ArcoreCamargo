@@ -73,6 +73,59 @@ class KmzParserTest {
         val targets = document.arTargets()
         assertTrue(targets.size >= 4)
         assertTrue(targets.any { it.name.contains("Predio") })
+        val marks = document.locationMarks()
+        assertTrue(marks.size >= 4)
+        assertEquals(marks.size, document.polygonVertices().size)
+    }
+
+    @Test
+    fun locationMarksIncludePointsPolygonCornersAndLineVertices() {
+        val xml = """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <kml xmlns="http://www.opengis.net/kml/2.2">
+              <Document>
+                <Placemark>
+                  <name>Mojon</name>
+                  <Point><coordinates>-71.5284,-16.4205,0</coordinates></Point>
+                </Placemark>
+                <Placemark>
+                  <name>Linde</name>
+                  <LineString>
+                    <coordinates>
+                      -71.5284,-16.4205,0
+                      -71.5283,-16.4204,0
+                    </coordinates>
+                  </LineString>
+                </Placemark>
+                <Placemark>
+                  <name>Predio</name>
+                  <Polygon>
+                    <outerBoundaryIs>
+                      <LinearRing>
+                        <coordinates>
+                          -71.5284,-16.4205,0
+                          -71.5283,-16.4205,0
+                          -71.5283,-16.4204,0
+                          -71.5284,-16.4204,0
+                          -71.5284,-16.4205,0
+                        </coordinates>
+                      </LinearRing>
+                    </outerBoundaryIs>
+                  </Polygon>
+                </Placemark>
+              </Document>
+            </kml>
+        """.trimIndent()
+
+        val document = KmzParser.parseKml("mixto.kml", xml)
+        val marks = document.locationMarks()
+        assertEquals(1, document.points.size)
+        assertEquals(2, document.lineVertices().size)
+        assertEquals(4, document.polygonVertices().size)
+        assertEquals(7, marks.size)
+        assertTrue(marks.any { it.name == "Mojon" })
+        assertTrue(marks.any { it.name.contains("Predio") })
+        assertTrue(marks.any { it.name.contains("Linde") })
     }
 
     @Test

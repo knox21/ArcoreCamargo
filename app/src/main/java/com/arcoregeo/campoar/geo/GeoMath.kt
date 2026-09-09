@@ -93,6 +93,25 @@ object GeoMath {
         )
     }
 
+    /**
+     * Turns a plan offset around the up axis. Positive [degrees] is counter-clockwise
+     * when looking down, the same sign SceneView uses for yaw around Y.
+     */
+    fun rotateYaw(east: Double, north: Double, degrees: Double): Pair<Double, Double> {
+        if (degrees == 0.0) return east to north
+        val rad = Math.toRadians(degrees)
+        val c = cos(rad)
+        val s = sin(rad)
+        return east * c - north * s to east * s + north * c
+    }
+
+    /** Keeps a manual heading offset in (−180, 180]. */
+    fun wrapYawDegrees(degrees: Float): Float {
+        var wrapped = (degrees + 180f) % 360f
+        if (wrapped < 0f) wrapped += 360f
+        return wrapped - 180f
+    }
+
     /** East/North/Up meters of [point] relative to [origin]. */
     fun toEnu(origin: LatLngAlt, point: LatLngAlt): Enu {
         val latRad = Math.toRadians(origin.latitude)

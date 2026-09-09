@@ -78,27 +78,44 @@ data class KmzDocument(
     /** Vertices for navigation chips / AR. Does not include the geometric centroid. */
     fun arTargets(): List<GeoPoint> {
         if (points.isNotEmpty()) return points
-        val fromPolygons = polygons.flatMap { polygon ->
-            val ring = openRing(polygon.ring)
-            ring.mapIndexed { index, coord ->
-                GeoPoint(
-                    id = "${polygon.id}-v$index",
-                    name = "${polygon.name} · v${index + 1}",
-                    description = "Vértice del polígono",
-                    coordinate = coord,
-                )
-            }
-        }
+        val fromPolygons = polygonVertices()
         if (fromPolygons.isNotEmpty()) return fromPolygons
-        return lines.flatMap { line ->
-            line.coordinates.mapIndexed { index, coord ->
-                GeoPoint(
-                    id = "${line.id}-v$index",
-                    name = "${line.name} · v${index + 1}",
-                    description = "Vértice de la línea",
-                    coordinate = coord,
-                )
-            }
+        return lineVertices()
+    }
+
+    /**
+     * Every locate-able mark in the file: placemarks, polygon corners and polyline
+     * vertices. The camera draws a bubble on each so you can match GPS and compass.
+     */
+    fun locationMarks(): List<GeoPoint> {
+        if (points.isEmpty() && polygons.isEmpty() && lines.isEmpty()) return emptyList()
+        return buildList {
+            addAll(points)
+            addAll(polygonVertices())
+            addAll(lineVertices())
+        }
+    }
+
+    fun polygonVertices(): List<GeoPoint> = polygons.flatMap { polygon ->
+        val ring = openRing(polygon.ring)
+        ring.mapIndexed { index, coord ->
+            GeoPoint(
+                id = "${polygon.id}-v$index",
+                name = "${polygon.name} · v${index + 1}",
+                description = "Vértice del polígono",
+                coordinate = coord,
+            )
+        }
+    }
+
+    fun lineVertices(): List<GeoPoint> = lines.flatMap { line ->
+        line.coordinates.mapIndexed { index, coord ->
+            GeoPoint(
+                id = "${line.id}-v$index",
+                name = "${line.name} · v${index + 1}",
+                description = "Vértice de la línea",
+                coordinate = coord,
+            )
         }
     }
 

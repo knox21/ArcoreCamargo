@@ -86,29 +86,17 @@ fun HomeScreen(
             if (state.importing) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
-            Column(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedButton(
-                    onClick = onImportArequipaSample,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Cargar polígono Arequipa + sólido 3D")
-                }
-            }
             if (state.documents.isEmpty()) {
                 Column(modifier = Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
                         text = "Importa KMZ, KML o IFC. En IFC puedes abrir el visor 3D o, si está georreferenciado, el mapa/AR.",
                         style = MaterialTheme.typography.bodyLarge,
                     )
-                    OutlinedButton(onClick = onImportSample) {
-                        Text("Cargar ejemplo de puntos")
-                    }
-                    OutlinedButton(onClick = onImportPolygonSample) {
-                        Text("Cargar ejemplo de polígono (Google Earth)")
-                    }
+                    SampleLoadButtons(
+                        onImportSample = onImportSample,
+                        onImportPolygonSample = onImportPolygonSample,
+                        onImportArequipaSample = onImportArequipaSample,
+                    )
                 }
             } else {
                 LazyColumn(
@@ -123,8 +111,34 @@ fun HomeScreen(
                             onDelete = { onDelete(document) },
                         )
                     }
+                    item(key = "sample-loaders") {
+                        SampleLoadButtons(
+                            onImportSample = onImportSample,
+                            onImportPolygonSample = onImportPolygonSample,
+                            onImportArequipaSample = onImportArequipaSample,
+                        )
+                    }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SampleLoadButtons(
+    onImportSample: () -> Unit,
+    onImportPolygonSample: () -> Unit,
+    onImportArequipaSample: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(onClick = onImportSample, modifier = Modifier.fillMaxWidth()) {
+            Text("Cargar ejemplo de puntos")
+        }
+        OutlinedButton(onClick = onImportPolygonSample, modifier = Modifier.fillMaxWidth()) {
+            Text("Cargar ejemplo de polígono (Google Earth)")
+        }
+        OutlinedButton(onClick = onImportArequipaSample, modifier = Modifier.fillMaxWidth()) {
+            Text("Cargar polígono Arequipa + sólido 3D")
         }
     }
 }

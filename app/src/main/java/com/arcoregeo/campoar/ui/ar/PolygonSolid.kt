@@ -1,11 +1,15 @@
 package com.arcoregeo.campoar.ui.ar
 
 import android.graphics.Color
+import com.arcoregeo.campoar.data.KmzDocument
 import com.arcoregeo.campoar.data.LatLngAlt
 import com.arcoregeo.campoar.data.LocalMesh
 import com.arcoregeo.campoar.data.MeshShading
+import com.arcoregeo.campoar.data.Vec3f
 import com.arcoregeo.campoar.data.edgeRibbons
+import com.arcoregeo.campoar.data.openRing
 import com.arcoregeo.campoar.data.shadingOf
+import com.arcoregeo.campoar.geo.GeoMath
 import com.arcoregeo.campoar.geo.ReferenceCalibration
 import com.google.android.filament.Engine
 import com.google.android.filament.MaterialInstance
@@ -20,6 +24,8 @@ import io.github.sceneview.node.CubeNode
 import io.github.sceneview.node.GeometryNode
 import io.github.sceneview.node.Node
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 private val WALL_COLOR = Float4(0.98f, 0.62f, 0.22f, 1f)
@@ -41,6 +47,10 @@ class ArSolidMaterials(loader: MaterialLoader) {
     val marker: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#38BDF8"))
     val you: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#34D399"))
     val outline: MaterialInstance = loader.createArVisibleColor(OUTLINE_COLOR)
+    val kmlFill: MaterialInstance = loader.createArShadedColor(Float4(0.28f, 0.78f, 0.96f, 1f))
+    val kmlLine: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#F472B6"))
+    val bubblePoint: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#22D3EE"))
+    val bubbleVertex: MaterialInstance = loader.createArVisibleColor(Color.parseColor("#FBBF24"))
 }
 
 /** Lit colour so walls, roofs and floors read as different faces under the AR light. */
@@ -211,13 +221,15 @@ fun relocateMeshNodes(
     meshOrigin: LatLngAlt?,
     rotationDeg: Float,
     heightOffsetMeters: Float = 0f,
+    yawOffsetDeg: Float = 0f,
 ) {
     val offset = meshOrigin?.let { calibration.enuOf(it) }
-    val east = offset?.east?.toFloat() ?: 0f
-    val north = offset?.north?.toFloat() ?: 0f
+    val east0 = offset?.east ?: 0.0
+    val north0 = offset?.north ?: 0.0
+    val (east, north) = GeoMath.rotateYaw(east0, north0, yawOffsetDeg.toDouble())
     val up = (offset?.up?.toFloat() ?: 0f) + heightOffsetMeters
-    val place = Position(east, up, -north)
-    val turn = Position(0f, rotationDeg, 0f)
+    val place = Position(east.toFloat(), up, (-north).toFloat())
+    val turn = Position(0f, rotationDeg + yawOffsetDeg, 0f)
     nodes.forEach { it.stand(place, turn) }
 }
 
@@ -386,6 +398,205 @@ private fun buildCapGeometry(
         indices += listOf(0, i0, i1)
         indices += listOf(0, i1, i0)
     }
+    return Geometry.Builder().vertices(vertices).indices(indices).build(engine)
+}
+
+private const val MAX_KML_POLYGONS = 40
+private const val MAX_KML_LINES = 40
+private const val MAX_KML_BUBBLES = 80
+private const val KML_SURFACE_LIFT_M = 0.04f
+
+private val KML_FILL_COLOR = Float4(0.28f, 0.78f, 0.96f, 1f)
+private val KML_LINE_COLOR = Float4(0.96f, 0.45f, 0.71f, 1f)
+private val BUBBLE_POINT_COLOR = Float4(0.13f, 0.83f, 0.93f, 1f)
+private val BUBBLE_VERTEX_COLOR = Float4(0.98f, 0.75f, 0.14f, 1f)
+
+/**
+ * KMZ/KML overlay: a polygon is a flat filled surface, a line is a line, and
+ * every vertex gets a bubble so you can match GPS and compass. No extruded posts.
+ */
+fun buildKmlOverlayNodes(
+    engine: Engine,
+    materials: ArSolidMaterials,
+    document: KmzDocument,
+    calibration: ReferenceCalibration,
+    heightOffsetMeters: Float = 0f,
+    yawOffsetDeg: Float = 0f,
+    includeFeatures: Boolean = true,
+    includeBubbles: Boolean = true,
+    bubbleSpanM: Float = 20f,
+): List<Node> {
+    val nodes = mutableListOf<Node>()
+    if (includeFeatures) {
+        document.polygons.take(MAX_KML_POLYGONS).forEach { polygon ->
+            val ring = openRing(polygon.ring).map { coord ->
+                enuPosition(coord, calibration, heightOffsetMeters, yawOffsetDeg)
+            }
+            kmlPolygonNodes(engine, materials, ring).let { nodes += it }
+        }
+        document.lines.take(MAX_KML_LINES).forEach { line ->
+            val path = line.coordinates.map { coord ->
+                enuPosition(coord, calibration, heightOffsetMeters, yawOffsetDeg)
+            }
+            kmlLineNode(engine, materials, path, bubbleSpanM)?.let { nodes += it }
+        }
+    }
+    if (includeBubbles) {
+        val radius = bubbleRadiusM(bubbleSpanM)
+        document.points.take(MAX_KML_BUBBLES).forEach { point ->
+            val at = enuPosition(point.coordinate, calibration, heightOffsetMeters, yawOffsetDeg)
+            bubbleNode(engine, materials.bubblePoint, at, radius, BUBBLE_POINT_COLOR)?.let { nodes += it }
+        }
+        val remaining = (MAX_KML_BUBBLES - document.points.size).coerceAtLeast(0)
+        if (remaining > 0) {
+            val vertices = document.polygonVertices() + document.lineVertices()
+            vertices.take(remaining).forEach { point ->
+                val at = enuPosition(point.coordinate, calibration, heightOffsetMeters, yawOffsetDeg)
+                bubbleNode(engine, materials.bubbleVertex, at, radius * 0.82f, BUBBLE_VERTEX_COLOR)
+                    ?.let { nodes += it }
+            }
+        }
+    }
+    return nodes
+}
+
+internal fun enuPosition(
+    coord: LatLngAlt,
+    calibration: ReferenceCalibration,
+    heightOffsetMeters: Float,
+    yawOffsetDeg: Float,
+): Float3 {
+    val enu = calibration.enuOf(coord)
+    val (east, north) = GeoMath.rotateYaw(enu.east, enu.north, yawOffsetDeg.toDouble())
+    return Float3(
+        east.toFloat(),
+        enu.up.toFloat() + heightOffsetMeters,
+        (-north).toFloat(),
+    )
+}
+
+internal fun bubbleRadiusM(spanM: Float): Float =
+    (spanM * 0.04f).coerceIn(0.22f, 0.7f)
+
+internal fun polylineRibbonMesh(points: List<Float3>, halfWidth: Float): LocalMesh? {
+    if (points.size < 2) return null
+    val vertices = points.map { Vec3f(it.x, it.y, it.z) }
+    val edges = ArrayList<Int>((points.size - 1) * 2)
+    for (i in 0 until points.lastIndex) {
+        edges += i
+        edges += i + 1
+    }
+    return edgeRibbons(LocalMesh("kml-line", vertices, emptyList()), edges, halfWidth)
+}
+
+private fun kmlPolygonNodes(
+    engine: Engine,
+    materials: ArSolidMaterials,
+    ring: List<Float3>,
+): List<Node> {
+    if (ring.size < 3) return emptyList()
+    val nodes = mutableListOf<Node>()
+    val y = ring.map { it.y }.average().toFloat() + KML_SURFACE_LIFT_M
+    val base = ring.map { Float2(it.x, it.z) }
+    buildCapGeometry(engine, base, y, Float3(0f, 1f, 0f), KML_FILL_COLOR)?.let { geometry ->
+        nodes += GeometryNode(engine, geometry, materials.kmlFill) {
+            culling(false)
+        }
+    }
+    val outline = ring.map { Float3(it.x, y, it.z) } + Float3(ring.first().x, y, ring.first().z)
+    val span = ringSpanM(ring)
+    val ribbon = polylineRibbonMesh(outline, (span * 0.012f).coerceIn(0.06f, 0.22f))
+    if (ribbon != null) {
+        buildMeshGeometry(engine, ribbon, OUTLINE_COLOR)?.let { geometry ->
+            nodes += GeometryNode(engine, geometry, materials.outline) {
+                culling(false)
+            }
+        }
+    }
+    return nodes
+}
+
+private fun kmlLineNode(
+    engine: Engine,
+    materials: ArSolidMaterials,
+    path: List<Float3>,
+    spanM: Float,
+): Node? {
+    val ribbon = polylineRibbonMesh(path, (spanM * 0.018f).coerceIn(0.08f, 0.28f)) ?: return null
+    val geometry = buildMeshGeometry(engine, ribbon, KML_LINE_COLOR) ?: return null
+    return GeometryNode(engine, geometry, materials.kmlLine) {
+        culling(false)
+    }
+}
+
+private fun bubbleNode(
+    engine: Engine,
+    material: MaterialInstance,
+    at: Float3,
+    radius: Float,
+    color: Float4,
+): Node? {
+    val geometry = sphereGeometry(engine, at.x, at.y + radius, at.z, radius, color) ?: return null
+    return GeometryNode(engine, geometry, material) {
+        culling(false)
+    }
+}
+
+private fun ringSpanM(points: List<Float3>): Float {
+    if (points.isEmpty()) return 8f
+    var minX = Float.MAX_VALUE
+    var maxX = -Float.MAX_VALUE
+    var minZ = Float.MAX_VALUE
+    var maxZ = -Float.MAX_VALUE
+    points.forEach { p ->
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.z < minZ) minZ = p.z
+        if (p.z > maxZ) maxZ = p.z
+    }
+    val span = maxOf(maxX - minX, maxZ - minZ)
+    return if (span.isFinite() && span > 0f) span else 8f
+}
+
+private fun sphereGeometry(
+    engine: Engine,
+    cx: Float,
+    cy: Float,
+    cz: Float,
+    radius: Float,
+    color: Float4,
+): Geometry? {
+    val slices = 10
+    val stacks = 6
+    val vertices = ArrayList<Geometry.Vertex>((slices + 1) * (stacks + 1))
+    val indices = ArrayList<Int>(slices * stacks * 12)
+    for (lat in 0..stacks) {
+        val theta = Math.PI * lat / stacks
+        val sinT = sin(theta).toFloat()
+        val cosT = cos(theta).toFloat()
+        for (lon in 0..slices) {
+            val phi = 2.0 * Math.PI * lon / slices
+            val x = sinT * cos(phi).toFloat()
+            val z = sinT * sin(phi).toFloat()
+            val n = Float3(x, cosT, z)
+            vertices += Geometry.Vertex(
+                Float3(cx + x * radius, cy + cosT * radius, cz + z * radius),
+                n,
+                Float2(lon.toFloat() / slices, lat.toFloat() / stacks),
+                color,
+            )
+        }
+    }
+    val cols = slices + 1
+    for (lat in 0 until stacks) {
+        for (lon in 0 until slices) {
+            val a = lat * cols + lon
+            val b = a + cols
+            indices += listOf(a, b, a + 1, a + 1, b, b + 1)
+            indices += listOf(a, a + 1, b, a + 1, b + 1, b)
+        }
+    }
+    if (vertices.isEmpty() || indices.size < 3) return null
     return Geometry.Builder().vertices(vertices).indices(indices).build(engine)
 }
 
