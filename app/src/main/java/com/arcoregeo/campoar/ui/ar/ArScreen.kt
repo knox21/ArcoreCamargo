@@ -185,9 +185,7 @@ fun ArScreen(
     var rootAnchor by remember { mutableStateOf<Anchor?>(null) }
     var ref1Geo by remember { mutableStateOf<LatLngAlt?>(null) }
     var ref1World by remember { mutableStateOf<FloatArray?>(null) }
-    var showSolid by remember {
-        mutableStateOf(document.polygons.isNotEmpty() || document.localMeshes.isNotEmpty())
-    }
+    var showSolid by remember { mutableStateOf(true) }
     var showMarkers by remember {
         mutableStateOf(document.polygons.isEmpty() && document.localMeshes.isEmpty())
     }
@@ -411,7 +409,6 @@ fun ArScreen(
                         refCount = calibration?.refCount ?: 0,
                         panelOpen = calibPanelOpen || calibMode != CalibMode.Idle,
                         showSolid = showSolid,
-                        showMarkers = showMarkers,
                         showEdges = showEdges,
                         gpsLocked = gpsLocked,
                         heightOffsetM = heightOffsetM,
@@ -421,29 +418,28 @@ fun ArScreen(
                             if (!calibPanelOpen) calibMode = CalibMode.Idle
                         },
                         onToggleSolid = { showSolid = !showSolid },
-                        onToggleMarkers = { showMarkers = !showMarkers },
                         onToggleEdges = { showEdges = !showEdges },
                         onBringHere = {
+                            showSolid = true
                             bringHereTick += 1
                             gpsLocked = false
                             fixHint = "Sólido delante, a la distancia para verlo completo " +
                                 "(no es su posición GPS)"
                         },
                         onToggleGpsLock = {
-                            if (placement == Placement.Local) {
-                                // Exit demo placement and resume real GPS/Geospatial distance.
-                                resumeGpsTick += 1
-                                gpsLocked = false
-                                fixHint = "GPS real: cerca a escala; a más de 100 m se acerca " +
-                                    "manteniendo dirección y orientación"
+                            gpsLocked = !gpsLocked
+                            fixHint = if (gpsLocked) {
+                                "GPS anclado · el sólido ya no salta con el GPS"
                             } else {
-                                gpsLocked = !gpsLocked
-                                fixHint = if (gpsLocked) {
-                                    "GPS anclado · el sólido ya no salta con el GPS"
-                                } else {
-                                    "GPS libre · sigue tu posición y la del modelo"
-                                }
+                                "GPS libre · sigue tu posición y la del modelo"
                             }
+                        },
+                        onResumeGps = {
+                            showSolid = true
+                            resumeGpsTick += 1
+                            gpsLocked = false
+                            fixHint = "GPS real: cerca a escala; a más de 100 m se acerca " +
+                                "manteniendo dirección y orientación"
                         },
                         onHeightUp = {
                             heightOffsetM = (heightOffsetM + 0.25f).coerceAtMost(8f)
@@ -649,7 +645,7 @@ private fun ArWorldScene(
     var childNodes by remember { mutableStateOf(emptyList<Node>()) }
     var youNode by remember { mutableStateOf<CubeNode?>(null) }
     var sceneViewRef by remember { mutableStateOf<ARSceneView?>(null) }
-    var retainedMesh by remember { mutableStateOf<List<Node>>(emptyList()) }
+    var retainedMesh by remember { mutableStateOf<ArMeshNodes?>(null) }
 
     var activeAnchor by remember { mutableStateOf<Anchor?>(null) }
     var activeCalib by remember { mutableStateOf<ReferenceCalibration?>(null) }
@@ -698,22 +694,19 @@ private fun ArWorldScene(
     val meshPlaceable = document.localMeshes.isNotEmpty() &&
         (document.meshOrigin != null || document.polygons.isEmpty())
 
-    // Geometry is built once per document/style. Rebuilding it on every GPS re-anchor
-    // is what closed the camera when edges or lighting were added.
-    LaunchedEffect(document.id, showSolid, showEdges, meshPlaceable) {
-        retainedMesh.forEach { node ->
+    // Geometry is built once per document. Edges are only shown or hidden — rebuilding
+    // the solid on that button is what made the camera hitch.
+    LaunchedEffect(document.id, showSolid, meshPlaceable) {
+        retainedMesh?.all?.forEach { node ->
             runCatching { node.parent?.removeChildNode(node) }
             runCatching { node.destroy() }
         }
-        retainedMesh = emptyList()
+        retainedMesh = null
         if (!showSolid || !meshPlaceable) return@LaunchedEffect
         val look = withContext(Dispatchers.Default) {
-            Pair(
-                if (showEdges) edgeCache.edges() else null,
-                edgeCache.shading(),
-            )
+            Pair(edgeCache.edges(), edgeCache.shading())
         }
-        retainedMesh = runCatching {
+        val built = runCatching {
             buildMeshNodes(
                 engine = engine,
                 materials = solidMaterials,
@@ -721,7 +714,13 @@ private fun ArWorldScene(
                 outlines = look.first,
                 looks = look.second,
             )
-        }.getOrDefault(emptyList())
+        }.getOrNull() ?: return@LaunchedEffect
+        built.showEdges(showEdges)
+        retainedMesh = built
+    }
+
+    LaunchedEffect(showEdges, retainedMesh) {
+        retainedMesh?.showEdges(showEdges)
     }
 
     LaunchedEffect(
@@ -731,14 +730,13 @@ private fun ArWorldScene(
         document.id,
         showSolid,
         showMarkers,
-        showEdges,
         heightOffsetM,
         retainedMesh,
     ) {
         val anchor = activeAnchor
         val calib = activeCalib
         val previousRoot = childNodes.firstOrNull()
-        retainedMesh.forEach { node ->
+        retainedMesh?.all?.forEach { node ->
             runCatching { node.parent?.removeChildNode(node) }
         }
         if (anchor == null || calib == null) {
@@ -751,16 +749,17 @@ private fun ArWorldScene(
         val root = AnchorNode(engine = engine, anchor = anchor)
         var parts = 0
         if (showSolid) {
-            if (meshPlaceable && retainedMesh.isNotEmpty()) {
+            val mesh = retainedMesh
+            if (meshPlaceable && mesh != null && mesh.bodies.isNotEmpty()) {
                 relocateMeshNodes(
-                    nodes = retainedMesh,
+                    nodes = mesh.all,
                     calibration = calib,
                     meshOrigin = document.meshOrigin,
                     rotationDeg = document.meshRotationDeg,
                     heightOffsetMeters = heightOffsetM,
                 )
-                retainedMesh.forEach { root.addChildNode(it) }
-                parts += retainedMesh.size
+                mesh.all.forEach { root.addChildNode(it) }
+                parts += mesh.all.size
             } else if (!meshPlaceable) {
                 val rings = document.polygons.take(MAX_AR_SOLIDS)
                 val detailed = rings.size <= DETAILED_SOLID_LIMIT
@@ -911,10 +910,8 @@ private fun ArWorldScene(
 
             if (liveResumeGps != handledResumeGps) {
                 handledResumeGps = liveResumeGps
-                if (livePlacement == Placement.Local && liveGeoReferenced) {
-                    activeAnchor?.detach()
-                    activeAnchor = null
-                    activeCalib = null
+                if (placement == Placement.Local && liveGeoReferenced) {
+                    // Keep the current solid on screen until the GPS anchor replaces it.
                     placement = Placement.None
                     onPlacementChanged(Placement.None)
                 }
@@ -925,7 +922,7 @@ private fun ArWorldScene(
                 placeInFront()
             }
 
-            if (livePlacement == Placement.Manual || livePlacement == Placement.Local) {
+            if (placement == Placement.Manual || placement == Placement.Local) {
                 farViewDistanceM = null
                 return@ARScene
             }
@@ -1056,17 +1053,16 @@ private fun ControlBar(
     refCount: Int,
     panelOpen: Boolean,
     showSolid: Boolean,
-    showMarkers: Boolean,
     showEdges: Boolean,
     gpsLocked: Boolean,
     heightOffsetM: Float,
     placement: Placement,
     onTogglePanel: () -> Unit,
     onToggleSolid: () -> Unit,
-    onToggleMarkers: () -> Unit,
     onToggleEdges: () -> Unit,
     onBringHere: () -> Unit,
     onToggleGpsLock: () -> Unit,
+    onResumeGps: () -> Unit,
     onHeightUp: () -> Unit,
     onHeightDown: () -> Unit,
     onHeightReset: () -> Unit,
@@ -1113,7 +1109,7 @@ private fun ControlBar(
             )
             ControlButton("Traer aquí", onBringHere, CONTROL_OFF)
             if (placement == Placement.Local) {
-                ControlButton("GPS real", onToggleGpsLock, Color(0xFF059669))
+                ControlButton("GPS real", onResumeGps, Color(0xFF059669))
             }
         }
         Row(
@@ -1145,11 +1141,6 @@ private fun ControlBar(
                 label = if (showSolid) "Sólido ON" else "Sólido OFF",
                 onClick = onToggleSolid,
                 container = if (showSolid) CONTROL_ON else CONTROL_OFF,
-            )
-            ControlButton(
-                label = if (showMarkers) "Marcas ON" else "Marcas OFF",
-                onClick = onToggleMarkers,
-                container = if (showMarkers) CONTROL_ON else CONTROL_OFF,
             )
             ControlButton("Ocultar", onHideUi, CONTROL_OFF)
         }

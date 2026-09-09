@@ -145,6 +145,21 @@ fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
 }
 
 /**
+ * Body and outline as two node lists so the camera can hide the edges without
+ * throwing the solid away and building it again (that is the hitch on the button).
+ */
+class ArMeshNodes(
+    val bodies: List<Node>,
+    val edges: List<Node>,
+) {
+    val all: List<Node> get() = bodies + edges
+
+    fun showEdges(visible: Boolean) {
+        edges.forEach { it.isVisible = visible }
+    }
+}
+
+/**
  * Places the IFC mesh itself in AR, so the camera shows the same model as the 3D
  * viewer instead of a box around the footprint.
  *
@@ -152,9 +167,8 @@ fun MaterialLoader.createArVisibleColor(colorInt: Int): MaterialInstance {
  * rotation). Call [relocateMeshNodes] to sit that frame on Earth; the geometry is
  * built once so a GPS re-anchor does not rebuild Filament buffers.
  *
- * Passing [outlines] draws a triangle ribbon over each crease. Faces are always
- * split into walls / slabs with outward normals — averaging both windings of each
- * triangle cancelled the lighting and the solid read as a flat block.
+ * Faces are always split into walls / slabs with outward normals. The outline is
+ * a triangle ribbon kept on the side and only shown when asked.
  */
 fun buildMeshNodes(
     engine: Engine,
@@ -162,9 +176,10 @@ fun buildMeshNodes(
     meshes: List<LocalMesh>,
     outlines: List<List<Int>>? = null,
     looks: List<MeshShading>? = null,
-): List<Node> {
-    if (meshes.isEmpty()) return emptyList()
-    val nodes = mutableListOf<Node>()
+): ArMeshNodes {
+    val bodies = mutableListOf<Node>()
+    val edges = mutableListOf<Node>()
+    if (meshes.isEmpty()) return ArMeshNodes(bodies, edges)
     meshes.forEachIndexed { index, mesh ->
         val shading = looks?.getOrNull(index) ?: runCatching { shadingOf(mesh) }.getOrNull()
         if (shading != null) {
@@ -173,21 +188,21 @@ fun buildMeshNodes(
                 shading.tops to materials.top,
                 shading.bottoms to materials.bottom,
             ).forEach { (indices, material) ->
-                meshGeometry(engine, mesh, shading, indices, material)?.let { nodes += it }
+                meshGeometry(engine, mesh, shading, indices, material)?.let { bodies += it }
             }
         } else {
             val geometry = buildMeshGeometry(engine, mesh, MESH_COLORS[index % MESH_COLORS.size])
                 ?: return@forEachIndexed
-            nodes += GeometryNode(engine, geometry, materials.wall) {
+            bodies += GeometryNode(engine, geometry, materials.wall) {
                 culling(false)
             }
         }
         if (outlines != null) {
             ribbonNode(engine, materials.outline, mesh, outlines.getOrNull(index).orEmpty())
-                ?.let { nodes += it }
+                ?.let { edges += it }
         }
     }
-    return nodes
+    return ArMeshNodes(bodies, edges)
 }
 
 fun relocateMeshNodes(
