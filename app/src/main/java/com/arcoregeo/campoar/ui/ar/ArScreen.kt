@@ -156,6 +156,11 @@ private class PlacementMemo {
         earthAnchor = anchorGeo
         farAway = newFarAway
     }
+
+    fun invalidate() {
+        fix = null
+        earthAnchor = null
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -186,6 +191,8 @@ fun ArScreen(
     var ref1Geo by remember { mutableStateOf<LatLngAlt?>(null) }
     var ref1World by remember { mutableStateOf<FloatArray?>(null) }
     var showSolid by remember { mutableStateOf(true) }
+    var showMiniMap by remember { mutableStateOf(false) }
+    var forceCloseUp by remember { mutableStateOf(false) }
     var showMarkers by remember {
         mutableStateOf(document.polygons.isEmpty() && document.localMeshes.isEmpty())
     }
@@ -199,6 +206,7 @@ fun ArScreen(
     var placement by remember { mutableStateOf(Placement.None) }
     var bringHereTick by remember { mutableStateOf(0) }
     var resumeGpsTick by remember { mutableStateOf(0) }
+    var acercarTick by remember { mutableStateOf(0) }
     var solidParts by remember { mutableStateOf(0) }
     var gpsLocked by remember { mutableStateOf(false) }
     var heightOffsetM by remember { mutableStateOf(0f) }
@@ -327,7 +335,9 @@ fun ArScreen(
                     pose = pose,
                     bringHereTick = bringHereTick,
                     resumeGpsTick = resumeGpsTick,
+                    acercarTick = acercarTick,
                     gpsLocked = gpsLocked,
+                    forceCloseUp = forceCloseUp,
                     heightOffsetM = heightOffsetM,
                     yawOffsetDeg = yawOffsetDeg,
                     onGeospatialStatus = onGeospatialStatus,
@@ -411,23 +421,40 @@ fun ArScreen(
                         refCount = calibration?.refCount ?: 0,
                         panelOpen = calibPanelOpen || calibMode != CalibMode.Idle,
                         showSolid = showSolid,
+                        showMiniMap = showMiniMap,
                         showEdges = showEdges,
                         gpsLocked = gpsLocked,
                         heightOffsetM = heightOffsetM,
                         yawOffsetDeg = yawOffsetDeg,
                         placement = placement,
+                        forceCloseUp = forceCloseUp,
                         onTogglePanel = {
                             calibPanelOpen = !calibPanelOpen
                             if (!calibPanelOpen) calibMode = CalibMode.Idle
                         },
                         onToggleSolid = { showSolid = !showSolid },
+                        onToggleMiniMap = { showMiniMap = !showMiniMap },
                         onToggleEdges = { showEdges = !showEdges },
                         onBringHere = {
                             showSolid = true
+                            forceCloseUp = false
                             bringHereTick += 1
                             gpsLocked = false
-                            fixHint = "Sólido delante, a la distancia para verlo completo " +
-                                "(no es su posición GPS)"
+                            fixHint = "Traer aquí · el sólido queda delante, donde apuntas " +
+                                "(no es su rumbo GPS)"
+                        },
+                        onAcercar = {
+                            showSolid = true
+                            forceCloseUp = !forceCloseUp
+                            gpsLocked = false
+                            acercarTick += 1
+                            if (placement == Placement.Local) resumeGpsTick += 1
+                            fixHint = if (forceCloseUp) {
+                                "Acercado · misma distancia que Traer aquí, en su rumbo " +
+                                    "y orientación reales"
+                            } else {
+                                "Distancia GPS real · si está lejos se ve más chico"
+                            }
                         },
                         onToggleGpsLock = {
                             gpsLocked = !gpsLocked
@@ -439,6 +466,7 @@ fun ArScreen(
                         },
                         onResumeGps = {
                             showSolid = true
+                            forceCloseUp = false
                             resumeGpsTick += 1
                             gpsLocked = false
                             fixHint = "GPS real: cerca a escala; a más de 100 m se acerca " +
@@ -563,6 +591,16 @@ fun ArScreen(
                 }
             }
 
+            if (showMiniMap && pose != null) {
+                ArMiniMap(
+                    document = document,
+                    pose = pose,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 8.dp, bottom = if (uiHidden) 16.dp else 72.dp),
+                )
+            }
+
             if (!uiHidden) {
                 if (pose != null && selected != null && calibMode == CalibMode.Idle) {
                     CompassNeedle(
@@ -574,12 +612,16 @@ fun ArScreen(
                             .size(72.dp),
                     )
                 }
-                OverlayGeometry(
-                    document = document,
-                    targets = targets,
-                    pose = pose,
-                    selectedId = selected?.id,
-                )
+                val overlayFar = pose != null && solidCentroid != null &&
+                    GeoMath.distanceMeters(pose.coordinate, solidCentroid) > 200.0
+                if (!overlayFar && !showMiniMap) {
+                    OverlayGeometry(
+                        document = document,
+                        targets = targets,
+                        pose = pose,
+                        selectedId = selected?.id,
+                    )
+                }
                 LazyRow(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -637,7 +679,9 @@ private fun ArWorldScene(
     pose: DevicePose?,
     bringHereTick: Int,
     resumeGpsTick: Int,
+    acercarTick: Int,
     gpsLocked: Boolean,
+    forceCloseUp: Boolean,
     heightOffsetM: Float,
     yawOffsetDeg: Float,
     onGeospatialStatus: (Boolean, Double?, String?) -> Unit,
@@ -663,6 +707,7 @@ private fun ArWorldScene(
     var placement by remember { mutableStateOf(Placement.None) }
     var handledBringHere by remember { mutableStateOf(0) }
     var handledResumeGps by remember { mutableStateOf(0) }
+    var handledAcercar by remember { mutableStateOf(0) }
     var farViewDistanceM by remember { mutableStateOf<Double?>(null) }
     val lastPlacement = remember { PlacementMemo() }
 
@@ -672,9 +717,11 @@ private fun ArWorldScene(
     val liveHalfExtent by rememberUpdatedState(solidHalfExtentM)
     val liveBringHere by rememberUpdatedState(bringHereTick)
     val liveResumeGps by rememberUpdatedState(resumeGpsTick)
+    val liveAcercar by rememberUpdatedState(acercarTick)
     val livePlacement by rememberUpdatedState(placement)
     val liveCalib by rememberUpdatedState(activeCalib)
     val liveGpsLocked by rememberUpdatedState(gpsLocked)
+    val liveForceCloseUp by rememberUpdatedState(forceCloseUp)
     val liveGeoReferenced by rememberUpdatedState(document.hasGeoReference)
 
     fun replaceAnchor(anchor: Anchor, calib: ReferenceCalibration, mode: Placement) {
@@ -955,6 +1002,15 @@ private fun ArWorldScene(
                 }
             }
 
+            if (liveAcercar != handledAcercar) {
+                handledAcercar = liveAcercar
+                lastPlacement.invalidate()
+                if (placement == Placement.Local && liveGeoReferenced) {
+                    placement = Placement.None
+                    onPlacementChanged(Placement.None)
+                }
+            }
+
             if (liveBringHere != handledBringHere && cameraReady) {
                 handledBringHere = liveBringHere
                 placeInFront()
@@ -989,6 +1045,7 @@ private fun ArWorldScene(
                 viewer = viewerGeo,
                 halfExtentM = liveHalfExtent,
                 wasFarAway = lastPlacement.farAway,
+                forceCloseUp = liveForceCloseUp,
             )
 
             // Geospatial only when we actually have a usable Earth pose. Never
@@ -1091,15 +1148,19 @@ private fun ControlBar(
     refCount: Int,
     panelOpen: Boolean,
     showSolid: Boolean,
+    showMiniMap: Boolean,
     showEdges: Boolean,
     gpsLocked: Boolean,
     heightOffsetM: Float,
     yawOffsetDeg: Float,
     placement: Placement,
+    forceCloseUp: Boolean,
     onTogglePanel: () -> Unit,
     onToggleSolid: () -> Unit,
+    onToggleMiniMap: () -> Unit,
     onToggleEdges: () -> Unit,
     onBringHere: () -> Unit,
+    onAcercar: () -> Unit,
     onToggleGpsLock: () -> Unit,
     onResumeGps: () -> Unit,
     onHeightUp: () -> Unit,
@@ -1117,7 +1178,9 @@ private fun ControlBar(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -1144,12 +1207,27 @@ private fun ControlBar(
                     .padding(horizontal = 8.dp, vertical = 5.dp),
             )
             ControlButton(
+                label = if (showMiniMap) "Mapa ON" else "Mapa",
+                onClick = onToggleMiniMap,
+                container = if (showMiniMap) CONTROL_ON else CONTROL_OFF,
+            )
+            ControlButton(
+                label = if (showSolid) "Sólido ON" else "Sólido OFF",
+                onClick = onToggleSolid,
+                container = if (showSolid) CONTROL_ON else CONTROL_OFF,
+            )
+            ControlButton(
                 label = if (gpsLocked) "Desanclar" else "Anclar GPS",
                 onClick = onToggleGpsLock,
                 container = if (gpsLocked) Color(0xFFDC2626) else CONTROL_ON,
                 enabled = placement != Placement.None || gpsLocked,
             )
             ControlButton("Traer aquí", onBringHere, CONTROL_OFF)
+            ControlButton(
+                label = if (forceCloseUp) "Acercado" else "Acercar",
+                onClick = onAcercar,
+                container = if (forceCloseUp) Color(0xFF059669) else CONTROL_OFF,
+            )
             if (placement == Placement.Local) {
                 ControlButton("GPS real", onResumeGps, Color(0xFF059669))
             }
@@ -1190,11 +1268,6 @@ private fun ControlBar(
                 label = if (showEdges) "Aristas ON" else "Ver aristas / colores",
                 onClick = onToggleEdges,
                 container = if (showEdges) Color(0xFFEA580C) else CONTROL_OFF,
-            )
-            ControlButton(
-                label = if (showSolid) "Sólido ON" else "Sólido OFF",
-                onClick = onToggleSolid,
-                container = if (showSolid) CONTROL_ON else CONTROL_OFF,
             )
             ControlButton("Ocultar", onHideUi, CONTROL_OFF)
         }
@@ -1343,7 +1416,7 @@ private fun GpsRelativeHud(
     }
     val modeNote = when {
         placement == Placement.Local -> "traído delante de ti · pulsa GPS real para su sitio"
-        farView -> "vista lejana · dibujado más cerca en su dirección real"
+        farView -> "acercado · misma distancia de Traer aquí, rumbo real"
         gpsLocked -> "GPS ANCLADO · no salta"
         placement == Placement.Geospatial -> "posición Geospatial"
         placement == Placement.Gps -> "GPS libre (puede saltar)"
@@ -1405,8 +1478,11 @@ private fun StatusChip(
         calibrating -> "Apunta la mira naranja al piso"
         calibRefs >= 2 -> "✓ Anclado al piso (2 refs)"
         calibRefs == 1 -> "Anclado parcial (1 ref)"
-        showSolid && polygonCount > 0 && solidParts == 0 && placement != Placement.None ->
-            "Sólido no dibujado · pulsa Traer aquí"
+        !showSolid -> "Sólido OFF · ${placementLabel(placement, accuracy)}"
+        showSolid && solidParts == 0 && placement == Placement.None ->
+            "Sólido ON · esperando GPS"
+        showSolid && solidParts == 0 ->
+            "Sólido ON · ${placementLabel(placement, accuracy)}"
         showSolid && solidParts > 0 ->
             "Sólido ON ($solidParts piezas) · ${placementLabel(placement, accuracy)}"
         placement == Placement.Local -> "Sólido en modo local (traído aquí)"

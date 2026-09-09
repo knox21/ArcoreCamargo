@@ -72,18 +72,21 @@ internal fun farViewPlan(
     viewer: LatLngAlt?,
     halfExtentM: Float,
     wasFarAway: Boolean,
+    forceCloseUp: Boolean = false,
 ): FarViewPlan {
     if (centroid == null || viewer == null) return FarViewPlan(null, null)
     val distance = GeoMath.distanceMeters(viewer, centroid)
+    val viewDist = viewDistanceFor(halfExtentM).toDouble()
     val threshold = if (wasFarAway) FAR_VIEW_EXIT_M else FAR_VIEW_TRIGGER_M
-    if (distance <= threshold) return FarViewPlan(distance, null)
+    val pullIn = if (forceCloseUp) distance > viewDist else distance > threshold
+    if (!pullIn) return FarViewPlan(distance, null)
     return FarViewPlan(
         realDistanceM = distance,
         standoff = Standoff(
             originGeo = farViewOrigin(
                 centroid = centroid,
                 viewer = viewer,
-                standoffM = viewDistanceFor(halfExtentM).toDouble(),
+                standoffM = viewDist,
             ),
             viewerGeo = viewer,
         ),
@@ -101,7 +104,11 @@ internal data class SolidExtent(
  * building, so a mesh document is measured from its own centre instead.
  */
 internal fun solidExtentOf(document: KmzDocument, fallback: LatLngAlt?): SolidExtent {
-    val ringPoints = document.polygons.flatMap { openRing(it.ring) }
+    val ringPoints = buildList {
+        document.polygons.forEach { addAll(openRing(it.ring)) }
+        document.lines.forEach { addAll(it.coordinates) }
+        document.points.forEach { add(it.coordinate) }
+    }
     if (ringPoints.isNotEmpty()) {
         val centroid = centroidOf(ringPoints)!!
         val half = ringPoints.maxOf { GeoMath.distanceMeters(centroid, it) }

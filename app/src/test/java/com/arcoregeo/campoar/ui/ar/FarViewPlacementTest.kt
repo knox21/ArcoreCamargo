@@ -219,4 +219,32 @@ class FarViewPlacementTest {
 
         assertEquals(300.0, sqrt(east * east + north * north), 1.0)
     }
+
+    @Test
+    fun `acercar at more than a kilometre uses the same standoff as Traer aqui`() {
+        val viewer = GeoMath.destination(centroid, 20.0, 1_250.0)
+        val plan = farViewPlan(
+            centroid, viewer, halfExtentM = 15f, wasFarAway = false, forceCloseUp = true,
+        )
+
+        assertTrue(plan.farAway)
+        assertEquals(1_250.0, plan.realDistanceM!!, 1.0)
+        assertEquals(
+            viewDistanceFor(15f).toDouble(),
+            GeoMath.distanceMeters(plan.standoff!!.originGeo, centroid),
+            0.5,
+        )
+        val drawn = drawnOffset(viewer, viewDistanceFor(15f).toDouble())
+        val bearing = (Math.toDegrees(atan2(drawn.first, drawn.second)) + 360.0) % 360.0
+        assertEquals(GeoMath.bearingDegrees(viewer, centroid), bearing, 0.5)
+    }
+
+    @Test
+    fun `acercar pulls in a model that is still under the automatic 100 m trigger`() {
+        val viewer = GeoMath.destination(centroid, 20.0, 50.0)
+        assertFalse(farViewPlan(centroid, viewer, 15f, wasFarAway = false).farAway)
+        assertTrue(
+            farViewPlan(centroid, viewer, 15f, wasFarAway = false, forceCloseUp = true).farAway,
+        )
+    }
 }
